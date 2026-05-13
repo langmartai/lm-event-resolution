@@ -1,7 +1,7 @@
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const { db, nodes, edges, sources, updates, search, graph } = require('../lib');
+const { db, nodes, edges, sources, updates, search, graph, vocabulary } = require('../lib');
 
 const PORT = Number(process.env.LER_PORT || 4100);
 
@@ -34,6 +34,7 @@ app.use((req, res, next) => {
   const q = req.query || {};
   req.audit = {
     sessionId: h['x-claude-session-id'] || b.sessionId || q.sessionId || null,
+    parentSessionId: h['x-claude-parent-session-id'] || b.parentSessionId || q.parentSessionId || null,
     projectPath: h['x-claude-project'] || h['x-claude-cwd'] || b.projectPath || q.projectPath || null,
     toolUseId: h['x-claude-tool-use-id'] || b.toolUseId || q.toolUseId || null,
     intent: h['x-claude-intent'] || b.intent || q.intent || null,
@@ -256,6 +257,155 @@ app.get('/api/updates', (req, res) => {
 
 app.get('/api/updates/:entityType/:entityId', (req, res) => {
   res.json(updates.listForEntity(req.params.entityType, Number(req.params.entityId)));
+});
+
+// ============================================================
+// Vocabulary — the controlled vocabulary + TOC
+// ============================================================
+app.get('/api/vocabulary', (req, res) => {
+  const { type, scope, parent, status, limit, offset } = req.query;
+  res.json(vocabulary.list({
+    type, scope, status,
+    parentKey: parent,
+    limit: limit ? Number(limit) : 200,
+    offset: offset ? Number(offset) : 0,
+  }));
+});
+
+app.get('/api/vocabulary/tree', (req, res) => {
+  res.json(vocabulary.tree({ root: req.query.root }));
+});
+
+app.get('/api/vocabulary/related', (req, res) => {
+  const { text, type, scope, limit } = req.query;
+  res.json({
+    query: text || '',
+    items: vocabulary.related(text, {
+      type, scope, limit: limit ? Number(limit) : 10,
+    }),
+  });
+});
+
+app.get('/api/vocabulary/:key', (req, res) => {
+  const v = vocabulary.getByKey(req.params.key);
+  if (!v) return res.status(404).json({ error: 'not found' });
+  const D = db.open();
+  const observations = D.prepare(
+    `SELECT id, uid, type, name, status, asset, valid_from, valid_to
+     FROM nodes WHERE concept_id = ? ORDER BY valid_from DESC LIMIT 100`
+  ).all(v.id);
+  const childRows = vocabulary.children(v.key);
+  res.json({ vocabulary: v, observations, children: childRows });
+});
+
+app.post('/api/vocabulary', (req, res) => {
+  try {
+    const body = req.body || {};
+    const created = vocabulary.register({
+      type: body.type, label: body.label, description: body.description,
+      scope: body.scope, aliases: body.aliases, auto_registered: !!body.auto_registered,
+      key: body.key,
+    }, req.audit);
+    if (body.parent) {
+      vocabulary.recategorize(created.key, body.parent, req.audit);
+    }
+    res.status(201).json(vocabulary.getByKey(created.key));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/vocabulary/:key', (req, res) => {
+  try {
+    res.json(vocabulary.update(req.params.key, req.body || {}, req.audit));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/vocabulary/:key/aliases', (req, res) => {
+  try {
+    const { alias } = req.body || {};
+    if (!alias) return res.status(400).json({ error: 'alias required' });
+    res.json(vocabulary.addAlias(req.params.key, alias, req.audit));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/categories', (req, res) => {
+  res.json(vocabulary.list({
+    type: 'category', scope: req.query.scope,
+    parentKey: req.query.parent,
+    limit: req.query.limit ? Number(req.query.limit) : 500,
+  }));
+});
+
+app.post('/api/categories', (req, res) => {
+  try {
+    const body = req.body || {};
+    const created = vocabulary.register({
+      type: 'category',
+      label: body.label, description: body.description,
+      scope: body.scope, aliases: body.aliases,
+      auto_registered: !!body.auto_registered, key: body.key,
+    }, req.audit);
+    if (body.parent) vocabulary.recategorize(created.key, body.parent, req.audit);
+    res.status(201).json(vocabulary.getByKey(created.key));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// Organizer — agents work through this surface
+// ============================================================
+app.get('/api/organizer/pending', (req, res) => {
+  res.json({
+    items: vocabulary.pendingReview({
+      type: req.query.type,
+      limit: req.query.limit ? Number(req.query.limit) : 100,
+    }),
+  });
+});
+
+app.get('/api/organizer/suggestions', (req, res) => {
+  res.json({
+    items: vocabulary.mergeSuggestions({
+      type: req.query.type || 'concept',
+      limit: req.query.limit ? Number(req.query.limit) : 50,
+    }),
+  });
+});
+
+app.post('/api/organizer/merge', (req, res) => {
+  try {
+    const { winner, loser, reason } = req.body || {};
+    if (!winner || !loser) return res.status(400).json({ error: 'winner and loser keys required' });
+    res.json(vocabulary.merge(winner, loser, { ...req.audit, reason }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/organizer/recategorize', (req, res) => {
+  try {
+    const { key, parent, reason } = req.body || {};
+    if (!key) return res.status(400).json({ error: 'key required' });
+    res.json(vocabulary.recategorize(key, parent || null, { ...req.audit, reason }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/organizer/mark-reviewed', (req, res) => {
+  try {
+    const { key, reason } = req.body || {};
+    if (!key) return res.status(400).json({ error: 'key required' });
+    res.json(vocabulary.markReviewed(key, { ...req.audit, reason }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ============================================================

@@ -65,6 +65,9 @@ function route() {
   if (path === '/sessions') return renderSessions();
   if (path.startsWith('/session/')) return renderSessionDetail(decodeURIComponent(path.slice(9)));
   if (path === '/dashboard') return renderDashboard();
+  if (path === '/vocabulary') return renderVocabulary();
+  if (path.startsWith('/vocab/')) return renderVocabDetail(decodeURIComponent(path.slice(7)));
+  if (path === '/organizer') return renderOrganizer();
   if (path === '/stats') return renderStats();
   setHTML(app, '<div class="card">Not found: ' + esc(path) + '</div>');
 }

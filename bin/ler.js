@@ -2,7 +2,7 @@
 const { Command } = require('commander');
 const fs = require('fs');
 const path = require('path');
-const { db, nodes, edges, sources, updates, search, graph } = require('../lib');
+const { db, nodes, edges, sources, updates, search, graph, vocabulary } = require('../lib');
 
 const program = new Command();
 
@@ -370,6 +370,236 @@ program.command('import-lmut <analyses_dir>')
     });
     console.log(JSON.stringify(stats, null, 2));
   });
+
+// ============================================================
+// vocab — manage the controlled vocabulary
+// ============================================================
+const vocab = program.command('vocab').description('Manage controlled vocabulary + TOC categories');
+
+vocab.command('list')
+  .description('List vocabulary entries')
+  .option('--type <t>', 'concept | category | actor | location | metric')
+  .option('--scope <s>', 'asset slug or other scope')
+  .option('--parent <key>', 'restrict to children of this parent key')
+  .option('--status <s>', 'active | merged | deprecated', 'active')
+  .option('--limit <n>', '', '50')
+  .action((opts) => {
+    const r = vocabulary.list({
+      type: opts.type, scope: opts.scope, parentKey: opts.parent, status: opts.status,
+      limit: Number(opts.limit),
+    });
+    console.log(`${r.count} of ${r.total} entries`);
+    for (const v of r.items) {
+      console.log(`  [${v.type}${v.scope ? ':' + v.scope : ''}]  ${v.key}`);
+      console.log(`      ${v.label}${v.auto_registered ? '  (auto)' : ''}`);
+    }
+  });
+
+vocab.command('show <key>')
+  .description('Show one vocabulary entry + its observations + children')
+  .action((key) => {
+    const v = vocabulary.getByKey(key);
+    if (!v) { console.error('Not found'); process.exit(1); }
+    console.log(JSON.stringify({ vocabulary: v, children: vocabulary.children(key) }, null, 2));
+  });
+
+vocab.command('related <text>')
+  .description('FTS search for vocabulary entries similar to <text>')
+  .option('--type <t>')
+  .option('--scope <s>')
+  .option('--limit <n>', '', '10')
+  .action((text, opts) => {
+    const items = vocabulary.related(text, {
+      type: opts.type, scope: opts.scope, limit: Number(opts.limit),
+    });
+    if (!items.length) { console.log('(no matches)'); return; }
+    for (const v of items) {
+      console.log(`  ${v.key}`);
+      console.log(`     ${v.label} (score ${v.score?.toFixed(2)})`);
+    }
+  });
+
+vocab.command('register')
+  .description('Register a new vocabulary entry')
+  .requiredOption('--type <t>', 'concept | category | actor | location | metric')
+  .requiredOption('--label <text>')
+  .option('--scope <s>')
+  .option('--description <text>')
+  .option('--parent <key>', 'set parent (places under a category)')
+  .option('--aliases <list>', 'comma-separated aliases')
+  .option('--reason <text>')
+  .action(function (opts) {
+    const audit = resolveAuditContext(this);
+    const created = vocabulary.register({
+      type: opts.type, label: opts.label, scope: opts.scope,
+      description: opts.description,
+      aliases: opts.aliases ? opts.aliases.split(',').map(s => s.trim()) : undefined,
+    }, { ...audit, reason: opts.reason });
+    if (opts.parent) vocabulary.recategorize(created.key, opts.parent, { ...audit, reason: 'set parent on register' });
+    console.log(JSON.stringify(vocabulary.getByKey(created.key), null, 2));
+  });
+
+vocab.command('merge <winner> <loser>')
+  .description('Merge `loser` into `winner` — observations move, loser status → merged')
+  .option('--reason <text>')
+  .action(function (winner, loser, opts) {
+    const audit = resolveAuditContext(this);
+    const r = vocabulary.merge(winner, loser, { ...audit, reason: opts.reason });
+    console.log(JSON.stringify(r, null, 2));
+  });
+
+vocab.command('recategorize <key> [parent]')
+  .description('Move `key` under `parent` (omit parent to detach to root)')
+  .option('--reason <text>')
+  .action(function (key, parent, opts) {
+    const audit = resolveAuditContext(this);
+    const r = vocabulary.recategorize(key, parent || null, { ...audit, reason: opts.reason });
+    console.log(JSON.stringify(r, null, 2));
+  });
+
+vocab.command('alias <key> <alias>')
+  .description('Add an alias to an entry (drives related-vocab matches)')
+  .action(function (key, alias) {
+    const audit = resolveAuditContext(this);
+    console.log(JSON.stringify(vocabulary.addAlias(key, alias, audit), null, 2));
+  });
+
+vocab.command('mark-reviewed <key>')
+  .description('Mark an auto_registered entry as reviewed (removes it from the organizer queue)')
+  .option('--reason <text>')
+  .action(function (key, opts) {
+    const audit = resolveAuditContext(this);
+    console.log(JSON.stringify(vocabulary.markReviewed(key, { ...audit, reason: opts.reason }), null, 2));
+  });
+
+vocab.command('pending')
+  .description('List auto_registered entries awaiting review')
+  .option('--type <t>')
+  .option('--limit <n>', '', '50')
+  .action((opts) => {
+    const items = vocabulary.pendingReview({
+      type: opts.type, limit: Number(opts.limit),
+    });
+    console.log(`${items.length} pending`);
+    for (const v of items) {
+      console.log(`  ${v.key}  ${v.label}  (obs: ${v.observation_count})`);
+    }
+  });
+
+// ============================================================
+// organize — delegate vocabulary work to an lm-assist agent
+// ============================================================
+const organize = program.command('organize').description('Trigger lm-assist agents to manage the vocabulary');
+
+organize.command('bootstrap')
+  .description('Migrate existing nodes into vocabulary. Spawns an lm-assist agent per asset.')
+  .option('--asset <slug>', 'restrict to one asset (default: all)')
+  .option('--lm-assist <url>', '', 'http://localhost:3100')
+  .option('--reason <text>')
+  .action(async function (opts) {
+    const audit = resolveAuditContext(this);
+    await runOrganizeAgent({
+      runbook: 'bootstrap',
+      audit, lmAssist: opts.lmAssist,
+      params: { asset: opts.asset },
+    });
+  });
+
+organize.command('review')
+  .description('Have an lm-assist agent review pending auto_registered entries and merge/recategorize')
+  .option('--type <t>', 'concept | category', 'concept')
+  .option('--lm-assist <url>', '', 'http://localhost:3100')
+  .option('--reason <text>')
+  .action(async function (opts) {
+    const audit = resolveAuditContext(this);
+    await runOrganizeAgent({
+      runbook: 'organize',
+      audit, lmAssist: opts.lmAssist,
+      params: { type: opts.type },
+    });
+  });
+
+organize.command('status')
+  .description('Show how many entries are pending review')
+  .action(() => {
+    const concepts = vocabulary.pendingReview({ type: 'concept', limit: 10000 }).length;
+    const categories = vocabulary.pendingReview({ type: 'category', limit: 10000 }).length;
+    const suggestions = vocabulary.mergeSuggestions({ type: 'concept', limit: 10000 }).length;
+    console.log(`Pending review:`);
+    console.log(`  concepts:    ${concepts}`);
+    console.log(`  categories:  ${categories}`);
+    console.log(`  merge suggestions: ${suggestions}`);
+  });
+
+async function runOrganizeAgent({ runbook, audit, lmAssist, params }) {
+  const fs = require('fs');
+  const http = require('http');
+  const runbookPath = path.join(__dirname, '..', 'docs', 'agents', `${runbook}.md`);
+  if (!fs.existsSync(runbookPath)) {
+    console.error(`Runbook not found: ${runbookPath}`);
+    process.exit(2);
+  }
+  const runbookText = fs.readFileSync(runbookPath, 'utf8');
+  const apiBase = process.env.LER_API_URL || 'http://localhost:4100';
+  const intent = `vocab-${runbook}` + (params.asset ? `: ${params.asset}` : '');
+  const prompt = [
+    runbookText,
+    '',
+    '## Runtime parameters',
+    `- LER API base: ${apiBase}`,
+    `- Parent session id (your caller): ${audit.sessionId}`,
+    `- Parent intent: ${audit.intent}`,
+    `- Use your own lm-assist execution id as X-Claude-Session-Id on every call to ${apiBase}`,
+    `- Use this intent (or a more specific variant) on every mutation: "${intent}"`,
+    `- Always include X-Claude-Parent-Session-Id: ${audit.sessionId} so the audit log shows lineage`,
+    params.asset ? `- Restrict work to asset: ${params.asset}` : '',
+    params.type   ? `- Vocabulary type to organize: ${params.type}` : '',
+  ].filter(Boolean).join('\n');
+
+  console.log(`Spawning lm-assist agent for runbook "${runbook}" against ${apiBase}…`);
+  console.log(`Parent session: ${audit.sessionId} · intent: ${intent}`);
+  console.log('');
+
+  const lmAssistUrl = new URL('/agent/execute', lmAssist);
+  const body = JSON.stringify({
+    prompt,
+    cwd: path.join(__dirname, '..'),
+    background: true,
+    model: 'sonnet',
+    permissionMode: 'bypassPermissions',
+    settingSources: ['project', 'user'],
+    extendedThinking: { enabled: true, type: 'adaptive' },
+    outputConfig: { effort: 'high' },
+  });
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: lmAssistUrl.hostname, port: lmAssistUrl.port || 80,
+      path: lmAssistUrl.pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body); req.end();
+  });
+
+  if (result.status >= 400) {
+    console.error('lm-assist returned', result.status);
+    console.error(result.body);
+    process.exit(1);
+  }
+  console.log('Agent launched.');
+  console.log(JSON.stringify(result.body, null, 2));
+  console.log('');
+  console.log('The agent will run in the background. Track its progress in /api/sessions');
+  console.log('and the Sessions tab — its mutations will be tagged with its own session id');
+  console.log(`and parent_session_id = ${audit.sessionId}.`);
+}
 
 // ----- serve -----
 program.command('serve')

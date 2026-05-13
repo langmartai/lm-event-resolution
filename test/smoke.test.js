@@ -216,6 +216,67 @@ test('mutations WITHOUT sessionId throw SESSION_REQUIRED', () => {
   }, /sessionId is required/i);
 });
 
+test('inline concept + category registration on node create', () => {
+  const ctx = { sessionId: 'smoke-test-session', intent: 'smoke test inline vocab' };
+  const { vocabulary } = require('../lib');
+  const n = nodes.create({
+    uid: 'test:vocab:1', type: 'factor', name: 'Hormuz blockade test',
+    asset: 'brent-oil',
+    concept: { label: 'Hormuz blockade', description: 'test concept' },
+    category: { label: 'supply disruption' },
+  }, ctx);
+  assert.ok(n.concept_id, 'concept_id should be populated');
+  assert.ok(n.category_id, 'category_id should be populated');
+  const c = vocabulary.getById(n.concept_id);
+  assert.equal(c.type, 'concept');
+  assert.equal(c.auto_registered, true);
+  // Reusing the same concept by key should not create a duplicate
+  const n2 = nodes.create({
+    uid: 'test:vocab:2', type: 'factor', name: 'Hormuz blockade test 2',
+    asset: 'brent-oil',
+    concept_key: c.key,
+    category_key: vocabulary.getById(n.category_id).key,
+  }, ctx);
+  assert.equal(n2.concept_id, n.concept_id);
+  assert.equal(n2.category_id, n.category_id);
+});
+
+test('vocabulary merge consolidates observations', () => {
+  const { vocabulary } = require('../lib');
+  const ctx = { sessionId: 'smoke-test-session', intent: 'smoke test merge' };
+  const a = vocabulary.register({ type: 'concept', label: 'Test concept A' }, ctx);
+  const b = vocabulary.register({ type: 'concept', label: 'Test concept B' }, ctx);
+  const na = nodes.create({ uid: 'merge:a:1', type: 'event', name: 'observation a',
+    concept_key: a.key }, ctx);
+  const nb = nodes.create({ uid: 'merge:b:1', type: 'event', name: 'observation b',
+    concept_key: b.key }, ctx);
+  vocabulary.merge(a.key, b.key, ctx);
+  const after_a = nodes.getById(na.id);
+  const after_b = nodes.getById(nb.id);
+  assert.equal(after_a.concept_id, a.id);
+  assert.equal(after_b.concept_id, a.id, 'b\'s observation should re-point to a after merge');
+  const b_after = vocabulary.getByKey(b.key);
+  assert.equal(b_after.status, 'merged');
+  assert.equal(b_after.merged_into_id, a.id);
+});
+
+test('bad concept_key on create is rejected', () => {
+  const ctx = { sessionId: 'smoke-test-session', intent: 'smoke test reject' };
+  assert.throws(() => {
+    nodes.create({ uid: 'bad:1', type: 'event', name: 'bad', concept_key: 'does-not-exist' }, ctx);
+  }, /concept_key not in vocabulary/);
+});
+
+test('parent_session_id is persisted when supplied', () => {
+  const ctx = {
+    sessionId: 'child-session-id', intent: 'agent work',
+    parentSessionId: 'parent-cli-session',
+  };
+  const n = nodes.create({ uid: 'parent:1', type: 'event', name: 'with parent' }, ctx);
+  const h = updates.listForEntity('node', n.id);
+  assert.equal(h[0].parent_session_id, 'parent-cli-session');
+});
+
 test('cleanup', () => {
   db.close();
   if (fs.existsSync(tmpDb)) fs.unlinkSync(tmpDb);

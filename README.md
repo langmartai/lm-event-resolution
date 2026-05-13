@@ -1,6 +1,6 @@
 # lm-event-resolution
 
-Local SQLite-backed **event relationship repository** with full-text search, dependency graphs, and an append-only audit trail of every change.
+Local SQLite-backed **event relationship repository** with a controlled vocabulary, full-text search, dependency graphs, and an append-only audit trail of every change.
 
 This project answers four questions for any forecast it stores:
 
@@ -62,6 +62,50 @@ Edges optionally carry a `weight` (e.g. probability, influence %, correlation) a
 
 Sources are cited by `citation` + optional `url`, classified as `news` / `official` / `agency` / `llm-search` / `api` / `analyst`, and attached to nodes via `node_sources` rows that can carry an evidence quote.
 
+### Controlled vocabulary + TOC
+
+Observations don't free-text their concepts. Every node is anchored to two
+**vocabulary** entries:
+
+| Table | What it holds |
+|---|---|
+| `vocabulary` | Canonical terms with a stable key. One row per concept / category / actor / location / metric. Forms a TOC via `parent_id`. |
+| `nodes.concept_id`, `nodes.category_id` | FKs into vocabulary — every observation says "I'm a thing about concept X in category Y" |
+
+**Write flow** for a source that's never seen us before:
+
+1. Ask `GET /api/vocabulary/related?text=Hormuz+blockade&scope=brent-oil` to see what's already in vocab. The response is FTS-ranked.
+2. Either write with `concept_key` referencing an existing entry, OR pass a `concept: { label, description, category: {label} }` block — the server inline-registers what's missing with `auto_registered=true`.
+3. Bad `concept_key` → `400 concept_key not in vocabulary`.
+
+**Two surfaces for ongoing vocabulary management:**
+
+- `/api/organizer/pending` — auto-registered entries awaiting human/agent review
+- `/api/organizer/suggestions` — heuristic merge candidates (same scope+type, label overlap)
+- `POST /api/organizer/merge` — consolidate two concepts (observations re-point to winner, loser marked `merged`)
+- `POST /api/organizer/recategorize` — move a concept under a different parent
+- `POST /api/organizer/mark-reviewed` — approve an entry, remove from queue
+
+**Both surfaces ship as web tabs (Vocabulary + Organizer) and CLI commands (`ler vocab …`, `ler organize …`).**
+
+### Vocabulary maintenance via lm-assist agents
+
+The repo provides the mechanics; **lm-assist runs the policy**. Two runbooks
+in `docs/agents/`:
+
+- `bootstrap.md` — instructs an agent to migrate existing observations into the
+  vocabulary (one asset per agent run). Triggered by `ler organize bootstrap --asset <slug>`.
+- `organize.md` — instructs an agent to periodically review the pending queue,
+  merge near-duplicates, recategorize misplaced concepts. Triggered by
+  `ler organize review`.
+
+Both CLI commands spawn an lm-assist agent via `POST localhost:3100/agent/execute`
+with the runbook text as the prompt. **The agent runs as its own session** —
+same session+intent enforcement applies on every API call it makes. Its
+session id is recorded on every mutation it performs, and `parent_session_id`
+on each audit row points back to the CLI invocation, so lineage is browsable
+in the Sessions tab.
+
 ### Audit trail (`updates` table)
 
 Every create, update, status change, link, and unlink writes a row with:
@@ -69,8 +113,10 @@ Every create, update, status change, link, and unlink writes a row with:
 - `before_json` / `after_json` — full snapshots
 - `change_type` — `create` | `update` | `status_change` | `delete` | `link` | `unlink`
 - `actor` — who made the change (cli, api, importer, …)
-- `reason` — why (free text)
-- `session_id` — Claude Code session that originated the call (see below)
+- `reason` — why (free text, per-mutation)
+- `intent` — higher-level WHY (e.g. `"vocab-bootstrap: brent-oil"`)
+- `session_id` — Claude Code session that originated the call
+- `parent_session_id` — when a CLI command spawns an agent, the agent's mutations carry the CLI session as parent → lineage is browsable
 - `project_path` — working directory of the originating session
 - `tool_use_id` — optional correlation id for a specific tool invocation
 
@@ -254,6 +300,13 @@ restrict to loopback.
 | GET    | `/api/dashboard`                      | Single-shot aggregate for the dashboard UI — counts, DB health (size/page count/integrity/sqlite version/journal mode), query-latency timings, breakdowns (type/status/certainty/asset/direction), top sessions, top-touched nodes, ETA-soon (next 30 days), stale (Valid To passed), intent log, last-14-days activity histogram, recent mutations |
 | GET    | `/api/sessions`                       | Sessions that mutated data — paginated. Params: `limit`, `offset`, `sort` (`last_seen`/`first_seen`/`update_count`/`nodes_touched`/`session_id`), `order` (`asc`/`desc`) |
 | GET    | `/api/sessions/:sessionId`            | Summary + breakdown (by change_type + entity_type) + nodes touched + paginated update timeline. Same `limit`/`offset`/`sort`/`order` |
+| GET    | `/api/vocabulary`                     | List vocabulary entries — filters: `type`, `scope`, `parent` (key), `status`, `limit`, `offset` |
+| GET    | `/api/vocabulary/tree`                | TOC tree (nested by parent_id) under an optional `root` key |
+| GET    | `/api/vocabulary/related?text=…`      | FTS suggestions — filters: `type`, `scope`, `limit`. Use BEFORE writing a new concept |
+| GET    | `/api/vocabulary/:key`                | Entry + its observations + its children |
+| GET    | `/api/categories`                     | Convenience filter: vocabulary entries of `type='category'` |
+| GET    | `/api/organizer/pending`              | Auto-registered entries awaiting review |
+| GET    | `/api/organizer/suggestions`          | Heuristic merge candidates |
 | GET    | `/api/nodes/:ref/sessions`            | All sessions that have touched this node (touches, first/last seen, change types) |
 
 ### Mutating endpoints — `X-Claude-Session-Id` REQUIRED
@@ -271,6 +324,13 @@ Calls without the header (or a `sessionId` field in the body/query) return
 | DELETE | `/api/edges`                   | `{src, dst, type, reason?}`                                         |
 | POST   | `/api/sources`                 | `{citation, url?, source_type?, trust_level?, notes?}`              |
 | POST   | `/api/sources/:sourceId/attach`| `{node, evidence?}`                                                 |
+| POST   | `/api/vocabulary`              | `{type, label, scope?, description?, aliases?, parent?, key?}` — register a new term (auto_registered defaults to false) |
+| PATCH  | `/api/vocabulary/:key`         | Update label / description / parent_id / status / aliases_json      |
+| POST   | `/api/vocabulary/:key/aliases` | `{alias}` — add an alternate name (used by `/related` matching)     |
+| POST   | `/api/categories`              | Convenience: register a `type='category'` entry                     |
+| POST   | `/api/organizer/merge`         | `{winner, loser, reason?}` — consolidate; observations move to winner |
+| POST   | `/api/organizer/recategorize`  | `{key, parent, reason?}` — move under a different parent            |
+| POST   | `/api/organizer/mark-reviewed` | `{key, reason?}` — remove from pending queue                        |
 
 ### Request headers (audit context)
 
