@@ -145,81 +145,163 @@ Requires Node 18+. Database is `data/ler.db` (override with `LER_DB=/path/to/db`
 
 ## CLI (`ler`)
 
-```bash
-# Database / schema
-ler init                          # create + migrate
+Every mutating command requires `--session-id <id>` (or `$LER_SESSION_ID` /
+`$CLAUDE_SESSION_ID` env var). Read commands (`get`, `list`, `search`,
+`graph`, `deps`, `history`) do not.
 
-# Nodes
-ler node add --uid X:1 --type event --name "Trump rejects Iran V2" \
+```bash
+# One-time: set your session id in the env so you don't repeat the flag.
+export LER_SESSION_ID="exec-1773287494272"
+
+# Database / schema (init is not gated — it doesn't write to the audit table)
+ler init
+
+# Nodes — mutating: --session-id required (or LER_SESSION_ID in env)
+ler node add --session-id $LER_SESSION_ID \
+             --uid X:1 --type event --name "Trump rejects Iran V2" \
              --asset brent-oil --status confirmed --temporal past \
              --direction bullish --magnitude major \
              --occurred-at 2026-05-11T20:00:00Z \
              --body-file event.md
-ler node get X:1
-ler node update X:1 --status invalidated --reason "Iran withdrew on May 12"
-ler node status X:1 superseded --reason "replaced by V3 framework"
-ler node list --type driver --asset brent-oil --status active
-ler node remove X:1 --reason "duplicate"
+ler node update --session-id $LER_SESSION_ID X:1 \
+             --status invalidated --reason "Iran withdrew on May 12"
+ler node status --session-id $LER_SESSION_ID X:1 superseded \
+             --reason "replaced by V3 framework"
+ler node remove --session-id $LER_SESSION_ID X:1 --reason "duplicate"
 
-# Edges
-ler edge link sub:1 factor:hormuz derives_from
-ler edge link sub:1 driver:rd1 supports --weight 0.4
-ler edge unlink sub:1 driver:rd1 supports
+# Nodes — read-only (no session id required)
+ler node get X:1
+ler node list --type driver --asset brent-oil --status active
+
+# Edges — mutating: --session-id required
+ler edge link --session-id $LER_SESSION_ID sub:1 factor:hormuz derives_from
+ler edge link --session-id $LER_SESSION_ID sub:1 driver:rd1 supports --weight 0.4
+ler edge unlink --session-id $LER_SESSION_ID sub:1 driver:rd1 supports
+
+# Edges — read-only
 ler edge list driver:rd1 --dir both
 
-# Sources
-ler source add --citation "Bloomberg May 11 2026" --url https://… --type news --trust 4
-ler source attach X:1 12 --evidence "Direct Trump quote on Truth Social"
+# Sources — mutating
+ler source add --session-id $LER_SESSION_ID \
+             --citation "Bloomberg May 11 2026" --url https://… --type news --trust 4
+ler source attach --session-id $LER_SESSION_ID X:1 12 \
+             --evidence "Direct Trump quote on Truth Social"
 
-# Search (FTS5)
+# Read-only
 ler search "hormuz blockade"
 ler search "rd1 OR rd2" --type driver --asset brent-oil
-
-# Graph / dependencies
 ler graph driver:rd1 --depth 2
 ler deps driver:rd1            # tree view
-
-# Audit history
 ler history driver:rd1
 
-# Import lm-unified-trade analyses
-ler import-lmut /path/to/lm-unified-trade/analyses \
+# Import lm-unified-trade analyses — mutating (writes lots of rows)
+ler import-lmut --session-id $LER_SESSION_ID /path/to/lm-unified-trade/analyses \
     --asset brent-oil --date 2026-05-13
 
-# Serve REST API + Web UI
+# Serve REST API + Web UI (server itself doesn't write — but mutating
+# requests routed through it still require the X-Claude-Session-Id header)
 ler serve --port 4100
 ```
+
+Global flags accepted by every command:
+
+| Flag                | Env var               | Purpose                                            |
+|---------------------|-----------------------|----------------------------------------------------|
+| `--session-id <id>` | `LER_SESSION_ID` / `CLAUDE_SESSION_ID` | Claude Code session id — **required for mutations** |
+| `--project <path>`  | `LER_PROJECT_PATH`    | Originating project / cwd (recorded in audit log)  |
+| `--tool-use-id <id>`| `LER_TOOL_USE_ID`     | Optional tool-use correlation id                   |
+| `--db <path>`       | `LER_DB`              | SQLite database file                               |
 
 ---
 
 ## REST API
 
-Start: `npm start` (or `node bin/ler.js serve`). Default port 4100, override with `LER_PORT`.
+Start: `npm start` (or `node bin/ler.js serve`). Default port 4100 (override
+with `LER_PORT`). Bound to `0.0.0.0` by default — set `LER_HOST=127.0.0.1` to
+restrict to loopback.
+
+`:ref` accepts numeric `id` or `uid`.
+
+### Read endpoints — no session required
 
 | Method | Endpoint                              | Purpose                                                       |
 |--------|---------------------------------------|---------------------------------------------------------------|
 | GET    | `/api/health`                         | Liveness + table row counts                                   |
 | GET    | `/api/meta`                           | Valid node types, statuses, edge types                        |
-| GET    | `/api/assets`                         | Distinct assets and node counts                               |
-| GET    | `/api/nodes`                          | List nodes (filters: `type`, `asset`, `status`, `limit`)      |
-| POST   | `/api/nodes`                          | Create node                                                   |
-| GET    | `/api/nodes/:ref`                     | Detail (node + sources + edges + history)                     |
-| PATCH  | `/api/nodes/:ref`                     | Update fields                                                 |
-| POST   | `/api/nodes/:ref/status`              | Change status (`{status, reason, actor}`)                     |
-| DELETE | `/api/nodes/:ref`                     | Delete                                                        |
-| GET    | `/api/edges`                          | List edges                                                    |
-| POST   | `/api/edges`                          | Create edge (`{src, dst, type, weight?, props?}`)             |
-| DELETE | `/api/edges`                          | Remove edge                                                   |
-| GET    | `/api/sources`                        | List                                                          |
-| POST   | `/api/sources`                        | Create / upsert                                               |
-| POST   | `/api/sources/:id/attach`             | Attach to node (`{node, evidence}`)                           |
-| GET    | `/api/search?q=…`                     | FTS5 search (filters: `type`, `asset`, `status`, `limit`)     |
-| GET    | `/api/graph/:ref?depth=2`             | Neighborhood (nodes + edges)                                  |
-| GET    | `/api/deps/:ref`                      | Dependency tree                                               |
-| GET    | `/api/updates`                        | Recent audit-log entries                                      |
-| GET    | `/api/updates/:entityType/:entityId`  | History of one entity                                         |
+| GET    | `/api/assets`                         | Distinct assets with node counts                              |
+| GET    | `/api/nodes`                          | List nodes — filters: `type`, `asset`, `status`, `limit`, `offset` |
+| GET    | `/api/nodes/:ref`                     | Detail bundle: node + sources + edges (in/out) + history      |
+| GET    | `/api/edges`                          | List all edges — filters: `type`, `limit`                     |
+| GET    | `/api/sources`                        | List all sources — filter: `type`                             |
+| GET    | `/api/search?q=…`                     | FTS5 search — filters: `type`, `asset`, `status`, `limit`     |
+| GET    | `/api/graph/:ref?depth=2`             | Neighborhood (nodes + edges) reachable in `depth` hops        |
+| GET    | `/api/deps/:ref`                      | Dependency tree rooted at this node                           |
+| GET    | `/api/updates`                        | Recent audit-log entries — filters: `limit`, `sessionId`, `actor` |
+| GET    | `/api/updates/:entityType/:entityId`  | Full audit history for one entity                             |
+| GET    | `/api/sessions`                       | All Claude Code sessions that have ever mutated data          |
+| GET    | `/api/sessions/:sessionId`            | Summary + nodes touched + update timeline for one session     |
 
-`:ref` accepts numeric id or uid.
+### Mutating endpoints — `X-Claude-Session-Id` REQUIRED
+
+Calls without the header (or a `sessionId` field in the body/query) return
+**`400 SESSION_REQUIRED`** with a hint on how to fix.
+
+| Method | Endpoint                       | Body shape                                                          |
+|--------|--------------------------------|---------------------------------------------------------------------|
+| POST   | `/api/nodes`                   | `{uid, type, name, asset?, body_md?, status?, certainty?, …}`       |
+| PATCH  | `/api/nodes/:ref`              | Any subset of node fields (`name`, `body_md`, `status`, `props`, …) |
+| POST   | `/api/nodes/:ref/status`       | `{status, reason?}`                                                 |
+| DELETE | `/api/nodes/:ref`              | (none) — optional `?reason=…`                                       |
+| POST   | `/api/edges`                   | `{src, dst, type, weight?, props?, reason?}`                        |
+| DELETE | `/api/edges`                   | `{src, dst, type, reason?}`                                         |
+| POST   | `/api/sources`                 | `{citation, url?, source_type?, trust_level?, notes?}`              |
+| POST   | `/api/sources/:sourceId/attach`| `{node, evidence?}`                                                 |
+
+### Request headers (audit context)
+
+| Header                   | Required?            | Purpose                                                  |
+|--------------------------|----------------------|----------------------------------------------------------|
+| `X-Claude-Session-Id`    | **yes (mutations)**  | Stable session ID — e.g. lm-assist `exec-…`, Claude Code session id |
+| `X-Claude-Project`       | optional             | Originating project / cwd                                |
+| `X-Claude-Tool-Use-Id`   | optional             | Correlation id for a specific tool invocation            |
+| `X-Claude-Actor`         | optional             | Display label (default: `session:<id>`)                  |
+| `Content-Type`           | `application/json` for POST/PATCH | —                                            |
+
+Body / query fields `sessionId`, `projectPath`, `toolUseId`, `actor` are
+accepted as fallbacks if you cannot set headers.
+
+### Examples
+
+Successful mutation (writes audit row attributed to the session):
+
+```bash
+curl -X POST http://localhost:4100/api/nodes \
+  -H "Content-Type: application/json" \
+  -H "X-Claude-Session-Id: exec-1773287494272" \
+  -H "X-Claude-Project: /home/ubuntu/lm-unified-trade" \
+  -d '{"uid":"brent-oil:2026-05-14:event:new","type":"event","name":"…","reason":"trade-monitor run"}'
+# → 201 Created
+```
+
+Missing the session header on a mutation:
+
+```bash
+curl -X POST http://localhost:4100/api/nodes \
+  -H "Content-Type: application/json" \
+  -d '{"uid":"x","type":"event","name":"y"}'
+# → 400 SESSION_REQUIRED
+# {"error":"SESSION_REQUIRED",
+#  "message":"Mutating requests must include an X-Claude-Session-Id header...",
+#  "hint":"Set X-Claude-Session-Id to your Claude Code session id..."}
+```
+
+Read endpoints are unaffected:
+
+```bash
+curl http://localhost:4100/api/nodes?type=driver        # → 200 OK
+curl http://localhost:4100/api/search?q=hormuz          # → 200 OK
+curl http://localhost:4100/api/sessions                 # → 200 OK (list of attributed sessions)
+```
 
 ---
 
@@ -228,12 +310,15 @@ Start: `npm start` (or `node bin/ler.js serve`). Default port 4100, override wit
 `/` (index.html) hosts a single-page browser with:
 
 - Full-text search box with type/asset/status filters
-- Browse by type (events, factors, sub-factors, drivers, monitors, scenarios)
-- Node detail with sources, incoming + outgoing edges, dependency neighborhood, audit history
-- Recent updates timeline
-- Repository stats (counts by type/status/asset)
+- **Nodes** tab — browse by type (events, factors, sub-factors, drivers, monitors, scenarios)
+- Node detail — sources, incoming + outgoing edges, dependency neighborhood, audit history (each update row links to the session that made it)
+- **Recent updates** — timeline of every mutation across the repo
+- **Sessions** — every Claude Code (or other) session that has mutated data, with drill-down to the timeline + nodes touched
+- **Stats** — counts by type / status / asset
 
-Zero build step — vanilla HTML, CSS, JS served by Express. Open `http://localhost:4100/` after `npm start`.
+Zero build step — vanilla HTML, CSS, JS served by Express. Open
+`http://localhost:4100/` after `npm start`. The UI is read-only; mutations
+still require the `X-Claude-Session-Id` header if you call the API directly.
 
 ---
 
@@ -250,14 +335,25 @@ The importer walks `analyses/{asset}/{date}/fundamental/` directories and ingest
 
 Idempotent — re-running on the same asset+date upserts existing rows (and appends to the audit log) rather than duplicating.
 
+**`--session-id` is REQUIRED.** The importer is a script, but a Claude Code
+session operates it — that session is recorded against every node, edge, and
+source it creates. Use `$LER_SESSION_ID` or `$CLAUDE_SESSION_ID` in the env
+to avoid repeating the flag.
+
 ```bash
-# --session-id is REQUIRED. The importer is a script; the session that runs it
-# is recorded against every row. Use $LER_SESSION_ID or $CLAUDE_SESSION_ID env
-# vars to avoid repeating the flag.
-ler import-lmut /home/ubuntu/lm-unified-trade/analyses --session-id $LER_SESSION_ID --dry-run
-ler import-lmut /home/ubuntu/lm-unified-trade/analyses --session-id <session-id> \
+# Via the CLI wrapper
+ler import-lmut --session-id $LER_SESSION_ID /home/ubuntu/lm-unified-trade/analyses --dry-run
+ler import-lmut --session-id $LER_SESSION_ID /home/ubuntu/lm-unified-trade/analyses \
+    --asset brent-oil --date 2026-05-13
+
+# Or directly via the script (same enforcement)
+node scripts/import-lmut.js /home/ubuntu/lm-unified-trade/analyses \
+    --session-id $LER_SESSION_ID \
     --asset brent-oil --date 2026-05-13
 ```
+
+Rows the importer writes are labelled `actor = importer:<sessionId>` so they
+can be distinguished from the same session's manual CLI / API mutations.
 
 Sample import (Brent oil, May 13, 2026):
 
@@ -276,19 +372,30 @@ Producing 23 factors, 60 sub-factors, 21 drivers, 52 monitors with full source c
 
 ## Schema
 
-See `migrations/001_init.sql` for the canonical SQL. High-level:
+See `migrations/001_init.sql` and `migrations/002_session_tracking.sql` for the
+canonical SQL. High-level:
 
 ```
-nodes (uid, type, name, asset, body_md, status, certainty, …)
-edges (src_id, dst_id, type, weight, props_json)
-sources (citation, url, source_type, trust_level)
+nodes        (uid, type, name, asset, body_md, status, certainty,
+              significance, direction, magnitude, temporal, props_json,
+              valid_from, valid_to, occurred_at, eta_date,
+              created_at, updated_at)
+edges        (src_id, dst_id, type, weight, props_json, created_at)
+sources      (citation, url, source_type, trust_level, notes)
 node_sources (node_id, source_id, evidence)
-updates (entity_type, entity_id, change_type, before_json, after_json, reason, actor)
-tags (node_id, tag)
-nodes_fts — FTS5 virtual table over (name, body_md, asset, type)
+updates      (entity_type, entity_id, change_type, before_json, after_json,
+              reason, actor,
+              session_id, project_path, tool_use_id,   ← migration 002
+              created_at)
+tags         (node_id, tag)
+nodes_fts    — FTS5 virtual table over (name, body_md, asset, type)
+schema_version (version, applied_at)
 ```
 
-`nodes_fts` is kept in sync by triggers on `nodes` so `UPDATE nodes …` automatically re-indexes.
+`nodes_fts` is kept in sync by triggers on `nodes`, so `INSERT`/`UPDATE` of
+nodes automatically re-indexes. Migrations are applied incrementally by
+version number — `node bin/ler.js init` reads `schema_version` and runs only
+the missing files.
 
 ---
 
