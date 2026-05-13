@@ -81,32 +81,78 @@ function navigate(hash) {
 }
 
 async function renderHome() {
-  setHTML(app, '<div class="card"><h3>Welcome</h3>' +
-    '<p>Typed-graph repository of <strong>events</strong>, <strong>factors</strong>, <strong>sub-factors</strong>, <strong>drivers</strong>, <strong>monitors</strong>, and <strong>scenarios</strong> with source citation, status tracking, dependency edges, and FTS5 full-text search.</p>' +
-    '<p>Browse by type:</p>' +
-    '<ul>' +
-      '<li><a href="#/nodes?type=driver">Resolution drivers</a></li>' +
-      '<li><a href="#/nodes?type=monitor">Monitors</a></li>' +
-      '<li><a href="#/nodes?type=sub_factor">Sub-factors</a></li>' +
-      '<li><a href="#/nodes?type=factor">Factors</a></li>' +
-      '<li><a href="#/nodes?type=event">Events</a></li>' +
-    '</ul></div>' +
-    '<div class="card"><h3>Recent updates</h3><div id="recentUpdates" class="spinner">loading…</div></div>');
-  const updates = await fetchJson('/api/updates?limit=15');
-  setHTML(document.getElementById('recentUpdates'), renderUpdateRows(updates));
+  setHTML(app,
+    '<div class="page-header"><div><h2>Event resolution repository</h2>' +
+      '<div class="sub">Typed-graph of events, factors, sub-factors, drivers, monitors, scenarios — with source citation, FTS5 search, audit trail, and session attribution.</div></div></div>' +
+    '<div class="tile-grid" id="homeTiles"></div>' +
+    '<div class="card"><h3>Browse by type</h3>' +
+      '<ul>' +
+        '<li><a href="#/nodes?type=driver">Resolution drivers</a></li>' +
+        '<li><a href="#/nodes?type=monitor">Monitors</a></li>' +
+        '<li><a href="#/nodes?type=sub_factor">Sub-factors</a></li>' +
+        '<li><a href="#/nodes?type=factor">Factors</a></li>' +
+        '<li><a href="#/nodes?type=event">Events</a></li>' +
+      '</ul>' +
+    '</div>' +
+    '<div class="card"><h3>Recent activity</h3><div id="recentUpdates" class="spinner">loading…</div></div>');
+
+  const [health, updates] = await Promise.all([
+    fetchJson('/api/health'),
+    fetchJson('/api/updates?limit=15'),
+  ]);
+  setHTML(document.getElementById('homeTiles'),
+    tile('Nodes', health.counts.nodes) +
+    tile('Edges', health.counts.edges) +
+    tile('Sources', health.counts.sources) +
+    tile('Audit entries', health.counts.updates)
+  );
+  setHTML(document.getElementById('recentUpdates'), renderUpdateRows(updates.items || updates));
+}
+
+function tile(label, value, sub) {
+  return '<div class="tile"><div class="tile-label">' + esc(label) + '</div>' +
+    '<div class="tile-value">' + value + '</div>' +
+    (sub ? '<div class="tile-sub">' + esc(sub) + '</div>' : '') + '</div>';
 }
 
 async function renderNodeList(params) {
+  const limit = Number(params.limit) || 50;
+  const offset = Number(params.offset) || 0;
+  const sort = params.sort || 'updated_at';
+  const order = params.order || 'desc';
+
   const qs = new URLSearchParams();
   if (params.type) qs.set('type', params.type);
   if (params.asset) qs.set('asset', params.asset);
   if (params.status) qs.set('status', params.status);
-  qs.set('limit', '100');
+  qs.set('limit', limit);
+  qs.set('offset', offset);
+  qs.set('sort', sort);
+  qs.set('order', order);
 
   const filters = [params.type && 'type: ' + params.type, params.asset && 'asset: ' + params.asset, params.status && 'status: ' + params.status].filter(Boolean).join(' · ');
-  setHTML(app, '<div class="card"><h3>Nodes' + (filters ? ' · ' + esc(filters) : '') + '</h3><div id="nodeList" class="spinner">loading…</div></div>');
+  setHTML(app,
+    '<div class="page-header"><div><h2>Nodes</h2>' +
+      (filters ? '<div class="sub">' + esc(filters) + '</div>' : '') +
+    '</div></div>' +
+    '<div id="nodeList" class="card spinner">loading…</div>');
+
   const data = await fetchJson('/api/nodes?' + qs);
-  setHTML(document.getElementById('nodeList'), renderNodeRows(data.items, data.total));
+  const sortBar = renderSortBar({ sort, order }, [
+    { key: 'updated_at', label: 'Updated' },
+    { key: 'created_at', label: 'Created' },
+    { key: 'name', label: 'Name' },
+    { key: 'type', label: 'Type' },
+    { key: 'status', label: 'Status' },
+    { key: 'eta_date', label: 'ETA' },
+  ]);
+  setHTML(document.getElementById('nodeList'),
+    sortBar +
+    renderNodeRows(data.items, data.total) +
+    renderPager({ total: data.total, offset: data.offset || offset, limit: data.limit || limit })
+  );
+  bindSortBar(document.getElementById('nodeList'));
+  bindPager(document.getElementById('nodeList'));
 }
 
 async function renderNodeDetail(uid) {
@@ -144,27 +190,41 @@ async function renderNodeDetail(uid) {
     return '<div class="edge-row"><a href="#/node/' + encodeURIComponent(e.src_uid) + '">' + esc(e.src_name) + '</a> <span class="et">' + esc(e.type) + '</span> → this<div class="meta">' + esc(e.src_node_type) + (e.weight != null ? ' · w=' + e.weight : '') + '</div></div>';
   }).join('');
 
-  const html = '<div class="detail-grid"><div>' +
-    '<div class="card"><div>' +
+  const sessions = data.sessions || [];
+  const sessionsHtml = sessions.length === 0
+    ? '<div class="meta">No tracked sessions have mutated this node yet.</div>'
+    : '<ul class="results">' + sessions.map(function(s) {
+        return '<li><div class="name"><a href="#/session/' + encodeURIComponent(s.session_id) + '">' + esc(s.session_id) + '</a></div>' +
+          '<div class="meta"><strong>' + s.touches + '</strong> changes · last ' + esc(s.last_touched) + '</div>' +
+          (s.change_types ? '<div class="meta">changes: ' + esc(s.change_types) + '</div>' : '') +
+        '</li>';
+      }).join('') + '</ul>';
+
+  const html =
+    '<div class="page-header"><div>' +
+      '<h2>' + esc(n.name) + '</h2>' +
+      '<div class="sub">' + esc(n.uid) + '</div>' +
+    '</div><div>' +
       badge('type', n.type) + ' ' + badge('status', n.status) +
       (n.certainty ? ' ' + badge('cert', n.certainty.split(/\s+/)[0]) : '') +
       (n.direction ? ' <span class="badge">' + esc(n.direction) + '</span>' : '') +
       (n.magnitude ? ' <span class="badge">' + esc(n.magnitude) + '</span>' : '') +
       (n.significance ? ' <span class="badge">' + esc(n.significance) + '</span>' : '') +
+    '</div></div>' +
+    '<div class="detail-grid"><div>' +
+      '<div class="card">' +
+        '<div class="kv">' + kvParts.join('') + '</div>' +
+        (n.body_md ? '<div class="body-md">' + esc(n.body_md) + '</div>' : '') + propsHtml +
+      '</div>' +
+      '<div class="card"><h3>Sources (' + data.sources.length + ')</h3>' + sourcesHtml + '</div>' +
+      '<div class="card"><h3>Update history (' + data.history.length + ')</h3>' + renderUpdateRows(data.history) + '</div>' +
     '</div>' +
-    '<h3 style="margin-top:8px">' + esc(n.name) + '</h3>' +
-    '<div class="meta">' + esc(n.uid) + '</div>' +
-    '<div class="kv" style="margin-top:10px">' + kvParts.join('') + '</div>' +
-    (n.body_md ? '<div class="body-md">' + esc(n.body_md) + '</div>' : '') + propsHtml +
-    '</div>' +
-    '<div class="card"><h3>Sources (' + data.sources.length + ')</h3>' + sourcesHtml + '</div>' +
-    '<div class="card"><h3>Update history (' + data.history.length + ')</h3>' + renderUpdateRows(data.history) + '</div>' +
-  '</div>' +
-  '<div>' +
-    '<div class="card"><h3>Outgoing edges (' + data.edges.out.length + ')</h3><div class="edge-list">' + outEdges + '</div></div>' +
-    '<div class="card"><h3>Incoming edges (' + data.edges.in.length + ')</h3><div class="edge-list">' + inEdges + '</div></div>' +
-    '<div class="card"><h3>Dependency neighborhood</h3><div class="meta">Depth 2 · typed edges</div><a href="/api/graph/' + encodeURIComponent(n.uid) + '?depth=2" target="_blank">JSON</a></div>' +
-  '</div></div>';
+    '<div>' +
+      '<div class="card"><h3>Sessions that touched this node (' + sessions.length + ')</h3>' + sessionsHtml + '</div>' +
+      '<div class="card"><h3>Outgoing edges (' + data.edges.out.length + ')</h3><div class="edge-list">' + outEdges + '</div></div>' +
+      '<div class="card"><h3>Incoming edges (' + data.edges.in.length + ')</h3><div class="edge-list">' + inEdges + '</div></div>' +
+      '<div class="card"><h3>Dependency neighborhood</h3><div class="meta">Depth 2 · typed edges</div><a href="/api/graph/' + encodeURIComponent(n.uid) + '?depth=2" target="_blank">JSON</a></div>' +
+    '</div></div>';
 
   setHTML(app, html);
 }
@@ -199,9 +259,37 @@ async function renderSearch(params) {
 }
 
 async function renderUpdates() {
-  setHTML(app, '<div class="card"><h3>Recent updates (audit trail)</h3><div id="updates" class="spinner">loading…</div></div>');
-  const data = await fetchJson('/api/updates?limit=100');
-  setHTML(document.getElementById('updates'), renderUpdateRows(data));
+  const params = paramsFromHash();
+  const limit = Number(params.limit) || 50;
+  const offset = Number(params.offset) || 0;
+  const sort = params.sort || 'id';
+  const order = params.order || 'desc';
+  const sessionFilter = params.sessionId || '';
+
+  setHTML(app,
+    '<div class="page-header"><div><h2>Audit trail</h2>' +
+      '<div class="sub">Every mutation across the repository, newest first.' +
+        (sessionFilter ? ' Filtered to session <code>' + esc(sessionFilter) + '</code>.' : '') +
+      '</div></div></div>' +
+    '<div id="updatesWrap" class="card spinner">loading…</div>');
+
+  const qs = new URLSearchParams({ limit, offset, sort, order });
+  if (sessionFilter) qs.set('sessionId', sessionFilter);
+  const data = await fetchJson('/api/updates?' + qs);
+
+  const sortBar = renderSortBar({ sort, order }, [
+    { key: 'id', label: 'Most recent' },
+    { key: 'created_at', label: 'Time' },
+    { key: 'change_type', label: 'Change type' },
+    { key: 'entity_type', label: 'Entity type' },
+  ]);
+  setHTML(document.getElementById('updatesWrap'),
+    sortBar +
+    renderUpdateRows(data.items) +
+    renderPager({ total: data.total, offset: data.offset, limit: data.limit })
+  );
+  bindSortBar(document.getElementById('updatesWrap'));
+  bindPager(document.getElementById('updatesWrap'));
 }
 
 async function renderStats() {

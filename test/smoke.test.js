@@ -106,17 +106,44 @@ test('session_id is persisted on every mutation', () => {
   }
 });
 
-test('listSessions groups by session_id', () => {
+test('listSessions groups by session_id, returns paginated envelope', () => {
   // Add a second session's activity so we have >1 row to group.
   nodes.create({
     uid: 'test:session:2', type: 'event', name: 'second session event',
   }, {
     actor: 'test', sessionId: 'exec-other-session-99',
   });
-  const list = updates.listSessions();
-  const seen = new Set(list.map(r => r.session_id));
+  const page = updates.listSessions({ limit: 10 });
+  assert.ok(Array.isArray(page.items));
+  assert.ok(page.total >= 2);
+  const seen = new Set(page.items.map(r => r.session_id));
   assert.ok(seen.has('exec-test-session-42'));
   assert.ok(seen.has('exec-other-session-99'));
+});
+
+test('listSessions supports sort by update_count desc', () => {
+  // Create another mutation on exec-test-session-42 so it has more updates than -99.
+  nodes.create({
+    uid: 'test:session:3', type: 'event', name: 'third event',
+  }, { actor: 'test', sessionId: 'exec-test-session-42' });
+  const page = updates.listSessions({ sort: 'update_count', order: 'desc' });
+  // We can't assert which session is #1 — earlier tests created many nodes
+  // under smoke-test-session, so it likely tops the chart. But we CAN assert
+  // that exec-test-session-42 (3 updates) comes before exec-other-session-99
+  // (1 update) in the sorted output.
+  const i42 = page.items.findIndex(r => r.session_id === 'exec-test-session-42');
+  const i99 = page.items.findIndex(r => r.session_id === 'exec-other-session-99');
+  assert.ok(i42 >= 0 && i99 >= 0, 'both sessions present');
+  assert.ok(i42 < i99, `exec-test-session-42 (idx ${i42}) should come before exec-other-session-99 (idx ${i99}) when sorted by update_count desc`);
+});
+
+test('listSessionsForNode returns sessions that touched a node', () => {
+  // Created in earlier test by exec-test-session-42 + updated by same session
+  const n = nodes.getByUid('test:session:1');
+  const list = updates.listSessionsForNode(n.id);
+  assert.ok(list.length >= 1);
+  assert.equal(list[0].session_id, 'exec-test-session-42');
+  assert.ok(list[0].touches >= 2);  // create + update
 });
 
 test('getSessionDetail returns nodes touched + update timeline', () => {

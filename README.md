@@ -229,17 +229,18 @@ restrict to loopback.
 | GET    | `/api/health`                         | Liveness + table row counts                                   |
 | GET    | `/api/meta`                           | Valid node types, statuses, edge types                        |
 | GET    | `/api/assets`                         | Distinct assets with node counts                              |
-| GET    | `/api/nodes`                          | List nodes — filters: `type`, `asset`, `status`, `limit`, `offset` |
+| GET    | `/api/nodes`                          | List nodes — filters: `type`, `asset`, `status`, `limit`, `offset`, `sort` (`updated_at`/`created_at`/`name`/`type`/`status`/`eta_date`), `order` |
 | GET    | `/api/nodes/:ref`                     | Detail bundle: node + sources + edges (in/out) + history      |
 | GET    | `/api/edges`                          | List all edges — filters: `type`, `limit`                     |
 | GET    | `/api/sources`                        | List all sources — filter: `type`                             |
 | GET    | `/api/search?q=…`                     | FTS5 search — filters: `type`, `asset`, `status`, `limit`     |
 | GET    | `/api/graph/:ref?depth=2`             | Neighborhood (nodes + edges) reachable in `depth` hops        |
 | GET    | `/api/deps/:ref`                      | Dependency tree rooted at this node                           |
-| GET    | `/api/updates`                        | Recent audit-log entries — filters: `limit`, `sessionId`, `actor` |
+| GET    | `/api/updates`                        | Audit-log entries — filters: `limit`, `offset`, `sessionId`, `actor`, `sort`, `order` |
 | GET    | `/api/updates/:entityType/:entityId`  | Full audit history for one entity                             |
-| GET    | `/api/sessions`                       | All Claude Code sessions that have ever mutated data          |
-| GET    | `/api/sessions/:sessionId`            | Summary + nodes touched + update timeline for one session     |
+| GET    | `/api/sessions`                       | Sessions that mutated data — paginated. Params: `limit`, `offset`, `sort` (`last_seen`/`first_seen`/`update_count`/`nodes_touched`/`session_id`), `order` (`asc`/`desc`) |
+| GET    | `/api/sessions/:sessionId`            | Summary + breakdown (by change_type + entity_type) + nodes touched + paginated update timeline. Same `limit`/`offset`/`sort`/`order` |
+| GET    | `/api/nodes/:ref/sessions`            | All sessions that have touched this node (touches, first/last seen, change types) |
 
 ### Mutating endpoints — `X-Claude-Session-Id` REQUIRED
 
@@ -309,11 +310,16 @@ curl http://localhost:4100/api/sessions                 # → 200 OK (list of at
 
 `/` (index.html) hosts a single-page browser with:
 
-- Full-text search box with type/asset/status filters
-- **Nodes** tab — browse by type (events, factors, sub-factors, drivers, monitors, scenarios)
-- Node detail — sources, incoming + outgoing edges, dependency neighborhood, audit history (each update row links to the session that made it)
-- **Recent updates** — timeline of every mutation across the repo
-- **Sessions** — every Claude Code (or other) session that has mutated data, with drill-down to the timeline + nodes touched
+- **Home** — dashboard tiles for total nodes/edges/sources/audit entries + recent activity
+- Full-text search box with type / asset / status filters
+- **Nodes** tab — browse by type (events, factors, sub-factors, drivers, monitors, scenarios); sortable columns + paginated
+- **Node detail** — three-card grid: details + sources + audit history on the left; *sessions that touched this node* + outgoing edges + incoming edges + dependency neighborhood on the right. Every update row in the history links to the session that made the change.
+- **Recent updates** — sortable + paginated timeline of every mutation
+- **Sessions** tab — sortable + paginated list of every Claude Code (or other) session that has mutated data; click into a session for a dashboard view:
+  - Tile grid: total mutations, breakdown by change-type and entity-type (mini bar charts), active window
+  - Nodes touched (sorted by how many times this session touched each, with a count badge)
+  - **Activity grouped by entity** — instead of a flat log, see one tile per touched entity showing the timeline of changes that session made to it
+  - Full sortable + paginated audit timeline
 - **Stats** — counts by type / status / asset
 
 Zero build step — vanilla HTML, CSS, JS served by Express. Open

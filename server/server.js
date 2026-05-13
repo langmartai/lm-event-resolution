@@ -75,14 +75,19 @@ app.get('/api/health', (req, res) => {
 // Nodes
 // ============================================================
 app.get('/api/nodes', (req, res) => {
-  const { type, asset, status, limit, offset } = req.query;
+  const { type, asset, status, limit, offset, sort, order } = req.query;
   const rows = nodes.list({
-    type, asset, status,
-    limit: limit ? Number(limit) : 100,
+    type, asset, status, sort, order,
+    limit: limit ? Number(limit) : 50,
     offset: offset ? Number(offset) : 0,
   });
   const total = nodes.count({ type, asset, status });
-  res.json({ total, count: rows.length, items: rows });
+  res.json({
+    total, count: rows.length,
+    offset: offset ? Number(offset) : 0,
+    limit: limit ? Number(limit) : 50,
+    items: rows,
+  });
 });
 
 app.post('/api/nodes', (req, res) => {
@@ -102,7 +107,19 @@ app.get('/api/nodes/:ref', (req, res) => {
   const outEdges = edges.listOut(n.id);
   const inEdges = edges.listIn(n.id);
   const history = updates.listForEntity('node', n.id);
-  res.json({ node: n, sources: srcs, edges: { out: outEdges, in: inEdges }, history });
+  const sessionsForNode = updates.listSessionsForNode(n.id);
+  res.json({
+    node: n, sources: srcs,
+    edges: { out: outEdges, in: inEdges },
+    history,
+    sessions: sessionsForNode,
+  });
+});
+
+app.get('/api/nodes/:ref/sessions', (req, res) => {
+  const n = nodes.getByIdOrUid(req.params.ref);
+  if (!n) return res.status(404).json({ error: 'not found' });
+  res.json(updates.listSessionsForNode(n.id));
 });
 
 app.patch('/api/nodes/:ref', (req, res) => {
@@ -219,10 +236,11 @@ app.get('/api/deps/:ref', (req, res) => {
 // Updates audit
 // ============================================================
 app.get('/api/updates', (req, res) => {
-  const { limit, sessionId, actor } = req.query;
+  const { limit, offset, sessionId, actor, sort, order } = req.query;
   res.json(updates.listRecent({
-    limit: limit ? Number(limit) : 100,
-    sessionId, actor,
+    limit: limit ? Number(limit) : 50,
+    offset: offset ? Number(offset) : 0,
+    sessionId, actor, sort, order,
   }));
 });
 
@@ -237,13 +255,21 @@ app.get('/api/updates/:entityType/:entityId', (req, res) => {
 // that have ever created or modified data. Read-only GETs are NOT tracked.
 // ============================================================
 app.get('/api/sessions', (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 100;
-  res.json(updates.listSessions({ limit }));
+  const { limit, offset, sort, order } = req.query;
+  res.json(updates.listSessions({
+    limit: limit ? Number(limit) : 25,
+    offset: offset ? Number(offset) : 0,
+    sort, order,
+  }));
 });
 
 app.get('/api/sessions/:sessionId', (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 500;
-  res.json(updates.getSessionDetail(req.params.sessionId, { limit }));
+  const { limit, offset, sort, order } = req.query;
+  res.json(updates.getSessionDetail(req.params.sessionId, {
+    limit: limit ? Number(limit) : 50,
+    offset: offset ? Number(offset) : 0,
+    sort, order,
+  }));
 });
 
 // ============================================================
