@@ -14,15 +14,18 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.5; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.5; min-height: 100vh; }
+html, body { width: 100%; }
+body { display: flex; flex-direction: column; min-height: 100vh; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { color: var(--accent-strong); }
 
 header {
   border-bottom: 1px solid var(--border);
-  padding: 12px 20px;
+  padding: 12px 24px;
   background: var(--panel);
   position: sticky; top: 0; z-index: 10;
+  width: 100%;
 }
 header h1 { margin: 0 0 8px 0; font-size: 17px; font-weight: 600; }
 header h1 a { color: var(--fg); }
@@ -48,7 +51,13 @@ nav#topnav a { color: var(--muted); font-size: 13px; }
 nav#topnav a.active { color: var(--fg); border-bottom: 2px solid var(--accent); padding-bottom: 2px; }
 
 main {
-  max-width: 1400px; margin: 16px auto; padding: 0 20px;
+  flex: 1;
+  width: 100%;
+  margin: 0;
+  padding: 20px 24px 32px 24px;
+}
+@media (min-width: 1900px) {
+  main { padding: 24px 40px 40px 40px; }
 }
 
 /* Page header — title + helper text + controls in a single row. */
@@ -59,10 +68,10 @@ main {
 .page-header h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .page-header .sub { color: var(--muted); font-size: 12px; }
 
-/* Dashboard tiles — small cards in a responsive grid. */
+/* Dashboard tiles — small cards in a responsive grid that fills the page width. */
 .tile-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px; margin-bottom: 16px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px; margin-bottom: 16px;
 }
 .tile {
   background: var(--panel); border: 1px solid var(--border);
@@ -78,7 +87,11 @@ main {
 .tile .tile-bar-row .bar > div { height: 100%; background: var(--accent); border-radius: 3px; }
 .tile .tile-bar-row .num { width: 32px; text-align: right; color: var(--fg); font-variant-numeric: tabular-nums; }
 
-footer { padding: 18px 20px; color: var(--muted); font-size: 12px; display: flex; gap: 10px; border-top: 1px solid var(--border); }
+footer {
+  padding: 14px 24px; color: var(--muted); font-size: 12px;
+  display: flex; gap: 10px; border-top: 1px solid var(--border);
+  width: 100%; box-sizing: border-box;
+}
 
 mark { background: var(--hl); color: #1a1a1a; padding: 1px 2px; border-radius: 2px; }
 
@@ -135,8 +148,14 @@ ul.results li .meta { color: var(--muted); font-size: 12px; }
 .badge.cert-L5 { background: #b9181833; color: #fecaca; border-color: #991b1b; }
 
 /* Node detail */
-.detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }
-@media (max-width: 800px) { .detail-grid { grid-template-columns: 1fr; } }
+/* Node detail: left = primary content; right = sessions/edges/links sidebar.
+   Sidebar widens on big screens but doesn't dominate. */
+.detail-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: minmax(0, 1fr) 380px;
+}
+@media (min-width: 1600px) { .detail-grid { grid-template-columns: minmax(0, 1fr) 440px; } }
+@media (max-width: 900px)  { .detail-grid { grid-template-columns: 1fr; } }
 
 .kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 13px; }
 .kv .k { color: var(--muted); }
