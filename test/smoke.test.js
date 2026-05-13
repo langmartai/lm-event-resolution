@@ -82,6 +82,60 @@ test('FTS5 type filter works', () => {
   for (const h of hits) assert.equal(h.type, 'driver');
 });
 
+test('session_id is persisted on every mutation', () => {
+  const n = nodes.create({
+    uid: 'test:session:1', type: 'event', name: 'session-tracked event',
+  }, {
+    actor: 'test',
+    sessionId: 'exec-test-session-42',
+    projectPath: '/tmp/lm-event-resolution',
+    toolUseId: 'toolu_xyz',
+  });
+  nodes.update(n.uid, { status: 'confirmed' }, {
+    actor: 'test',
+    sessionId: 'exec-test-session-42',
+    projectPath: '/tmp/lm-event-resolution',
+  });
+  const h = updates.listForEntity('node', n.id);
+  assert.equal(h.length, 2);
+  for (const row of h) {
+    assert.equal(row.session_id, 'exec-test-session-42');
+    assert.equal(row.project_path, '/tmp/lm-event-resolution');
+  }
+});
+
+test('listSessions groups by session_id', () => {
+  // Add a second session's activity so we have >1 row to group.
+  nodes.create({
+    uid: 'test:session:2', type: 'event', name: 'second session event',
+  }, {
+    actor: 'test', sessionId: 'exec-other-session-99',
+  });
+  const list = updates.listSessions();
+  const seen = new Set(list.map(r => r.session_id));
+  assert.ok(seen.has('exec-test-session-42'));
+  assert.ok(seen.has('exec-other-session-99'));
+});
+
+test('getSessionDetail returns nodes touched + update timeline', () => {
+  const d = updates.getSessionDetail('exec-test-session-42');
+  assert.equal(d.session_id, 'exec-test-session-42');
+  assert.ok(d.summary.update_count >= 2);
+  assert.ok(d.nodes.some(n => n.uid === 'test:session:1'));
+  assert.ok(d.updates.every(u => u.session_id === 'exec-test-session-42'));
+});
+
+test('GET endpoints do NOT write to updates (no session pollution from reads)', () => {
+  // Confirm by comparing update counts before/after a series of reads.
+  const beforeCount = db.open().prepare('SELECT COUNT(*) AS n FROM updates').get().n;
+  nodes.list({ type: 'event' });
+  nodes.getByUid('test:session:1');
+  search.search('event');
+  updates.listSessions();
+  const afterCount = db.open().prepare('SELECT COUNT(*) AS n FROM updates').get().n;
+  assert.equal(beforeCount, afterCount, 'reads must not write to updates table');
+});
+
 test('cleanup', () => {
   db.close();
   if (fs.existsSync(tmpDb)) fs.unlinkSync(tmpDb);

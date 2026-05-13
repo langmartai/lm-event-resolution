@@ -62,6 +62,8 @@ function route() {
     return renderSearch(params);
   }
   if (path === '/updates') return renderUpdates();
+  if (path === '/sessions') return renderSessions();
+  if (path.startsWith('/session/')) return renderSessionDetail(decodeURIComponent(path.slice(9)));
   if (path === '/stats') return renderStats();
   setHTML(app, '<div class="card">Not found: ' + esc(path) + '</div>');
 }
@@ -248,9 +250,14 @@ function renderUpdateRows(rows) {
   if (!rows || !rows.length) return '<div class="meta">No activity.</div>';
   return rows.map(function(r) {
     const diff = r.before && r.after ? diffObject(r.before, r.after) : '';
+    const sessionLink = r.session_id
+      ? ' · <a href="#/session/' + encodeURIComponent(r.session_id) + '">session ' + esc(short(r.session_id)) + '</a>'
+      : '';
     return '<div class="update-row"><span class="ut">' + esc(r.created_at) + '</span> · <span class="uchange">' + esc(r.change_type) + '</span> · <span>' + esc(r.entity_type) + ' #' + r.entity_id + '</span>' +
+      sessionLink +
       (r.actor ? ' · by ' + esc(r.actor) : '') +
       (r.reason ? ' · ' + esc(r.reason) : '') +
+      (r.project_path ? '<div class="meta">project: ' + esc(r.project_path) + '</div>' : '') +
       (diff ? '<div class="udiff">' + diff + '</div>' : '') + '</div>';
   }).join('');
 }

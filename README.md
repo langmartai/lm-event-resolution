@@ -70,8 +70,50 @@ Every create, update, status change, link, and unlink writes a row with:
 - `change_type` — `create` | `update` | `status_change` | `delete` | `link` | `unlink`
 - `actor` — who made the change (cli, api, importer, …)
 - `reason` — why (free text)
+- `session_id` — Claude Code session that originated the call (see below)
+- `project_path` — working directory of the originating session
+- `tool_use_id` — optional correlation id for a specific tool invocation
+
+**Reads are not tracked.** Only mutations (POST / PATCH / DELETE — or any
+library call that writes) land in the `updates` table. GETs and FTS searches
+never write rows, so session attribution is exclusively for who has changed
+state, not who has looked at it.
 
 Nothing in the data is destructive; deletes leave a tombstone in the audit log.
+
+### Session tracking (who modified this repository?)
+
+To attribute mutations to a specific Claude Code session (or any identifiable
+caller), pass these headers on every POST / PATCH / DELETE:
+
+| Header                   | Purpose                                                  |
+|--------------------------|----------------------------------------------------------|
+| `X-Claude-Session-Id`    | Stable session ID (e.g. lm-assist `exec-...`, Claude Code session id) |
+| `X-Claude-Project`       | Originating project / cwd                                |
+| `X-Claude-Tool-Use-Id`   | Optional — correlates with a specific tool call          |
+| `X-Claude-Actor`         | Optional — display label (default: `session:<id>`)       |
+
+Example — Claude Code agent writing a new event:
+
+```bash
+curl -X POST http://localhost:4100/api/nodes \
+  -H "Content-Type: application/json" \
+  -H "X-Claude-Session-Id: exec-1773287494272" \
+  -H "X-Claude-Project: /home/ubuntu/lm-unified-trade" \
+  -d '{"uid":"brent-oil:2026-05-14:event:new","type":"event","name":"…","reason":"trade-monitor run"}'
+```
+
+Two endpoints surface the resulting attribution:
+
+| Endpoint                          | Returns                                                          |
+|-----------------------------------|------------------------------------------------------------------|
+| `GET /api/sessions`               | All sessions with `update_count`, `nodes_touched`, first/last seen |
+| `GET /api/sessions/:sessionId`    | Summary + nodes touched + full update timeline for one session   |
+
+The web UI exposes a **Sessions** tab listing every Claude Code (or other)
+session that has ever mutated data, with drill-down to the timeline of
+changes that session made. Individual update rows in the audit log link
+back to their session detail page.
 
 ---
 

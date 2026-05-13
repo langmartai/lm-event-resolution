@@ -10,9 +10,36 @@ db.open();
 db.migrate();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  exposedHeaders: ['X-Claude-Session-Id', 'X-Claude-Project'],
+}));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Session-tracking middleware. Each request can identify which Claude Code
+// session (or other client) initiated the call. Identification flows from
+// (in priority order):
+//   1. X-Claude-Session-Id / X-Claude-Project / X-Claude-Tool-Use-Id headers
+//   2. Body fields { sessionId, projectPath, toolUseId, actor }
+//   3. Query params (?sessionId=... etc) — useful for GETs that mutate via POST
+//
+// The resulting `req.audit` object is passed to every mutator so every row
+// written to the `updates` table is attributable to a specific caller.
+app.use((req, res, next) => {
+  const h = req.headers;
+  const b = (req.body && typeof req.body === 'object') ? req.body : {};
+  const q = req.query || {};
+  req.audit = {
+    sessionId: h['x-claude-session-id'] || b.sessionId || q.sessionId || null,
+    projectPath: h['x-claude-project'] || h['x-claude-cwd'] || b.projectPath || q.projectPath || null,
+    toolUseId: h['x-claude-tool-use-id'] || b.toolUseId || q.toolUseId || null,
+    actor: h['x-claude-actor'] || b.actor || q.actor ||
+      // Fallback: derive a stable label from the session id if present, else
+      // "api" if anonymous.
+      (h['x-claude-session-id'] ? `session:${h['x-claude-session-id']}` : 'api'),
+  };
+  next();
+});
 
 const publicDir = path.join(__dirname, '..', 'public');
 app.use(express.static(publicDir));
@@ -51,10 +78,7 @@ app.get('/api/nodes', (req, res) => {
 app.post('/api/nodes', (req, res) => {
   try {
     const body = req.body || {};
-    const created = nodes.create(body, {
-      actor: body.actor || 'api',
-      reason: body.reason,
-    });
+    const created = nodes.create(body, { ...req.audit, reason: body.reason });
     res.status(201).json(created);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -74,8 +98,7 @@ app.get('/api/nodes/:ref', (req, res) => {
 app.patch('/api/nodes/:ref', (req, res) => {
   try {
     const updated = nodes.update(req.params.ref, req.body || {}, {
-      actor: (req.body && req.body.actor) || 'api',
-      reason: req.body && req.body.reason,
+      ...req.audit, reason: req.body && req.body.reason,
     });
     res.json(updated);
   } catch (err) {
@@ -85,11 +108,9 @@ app.patch('/api/nodes/:ref', (req, res) => {
 
 app.post('/api/nodes/:ref/status', (req, res) => {
   try {
-    const { status, reason, actor } = req.body || {};
+    const { status, reason } = req.body || {};
     if (!status) return res.status(400).json({ error: 'status is required' });
-    const updated = nodes.setStatus(req.params.ref, status, {
-      actor: actor || 'api', reason,
-    });
+    const updated = nodes.setStatus(req.params.ref, status, { ...req.audit, reason });
     res.json(updated);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -97,10 +118,7 @@ app.post('/api/nodes/:ref/status', (req, res) => {
 });
 
 app.delete('/api/nodes/:ref', (req, res) => {
-  const ok = nodes.remove(req.params.ref, {
-    actor: req.query.actor || 'api',
-    reason: req.query.reason,
-  });
+  const ok = nodes.remove(req.params.ref, { ...req.audit, reason: req.query.reason });
   res.json({ deleted: ok });
 });
 
@@ -114,11 +132,9 @@ app.get('/api/edges', (req, res) => {
 
 app.post('/api/edges', (req, res) => {
   try {
-    const { src, dst, type, weight, props, actor, reason } = req.body || {};
+    const { src, dst, type, weight, props, reason } = req.body || {};
     if (!src || !dst || !type) return res.status(400).json({ error: 'src, dst, type required' });
-    const e = edges.link(src, dst, type, {
-      weight, props, actor: actor || 'api', reason,
-    });
+    const e = edges.link(src, dst, type, { ...req.audit, weight, props, reason });
     res.status(201).json(e);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -126,11 +142,8 @@ app.post('/api/edges', (req, res) => {
 });
 
 app.delete('/api/edges', (req, res) => {
-  const { src, dst, type } = req.body || {};
-  const ok = edges.unlink(src, dst, type, {
-    actor: (req.body && req.body.actor) || 'api',
-    reason: req.body && req.body.reason,
-  });
+  const { src, dst, type, reason } = req.body || {};
+  const ok = edges.unlink(src, dst, type, { ...req.audit, reason });
   res.json({ unlinked: ok });
 });
 
@@ -143,7 +156,7 @@ app.get('/api/sources', (req, res) => {
 
 app.post('/api/sources', (req, res) => {
   try {
-    const s = sources.upsert(req.body || {});
+    const s = sources.upsert(req.body || {}, req.audit);
     res.status(201).json(s);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -154,7 +167,7 @@ app.post('/api/sources/:sourceId/attach', (req, res) => {
   try {
     const { node, evidence } = req.body || {};
     if (!node) return res.status(400).json({ error: 'node ref required' });
-    const link = sources.attach(node, Number(req.params.sourceId), { evidence });
+    const link = sources.attach(node, Number(req.params.sourceId), { ...req.audit, evidence });
     res.status(201).json(link || { attached: false, reason: 'already attached' });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -196,11 +209,31 @@ app.get('/api/deps/:ref', (req, res) => {
 // Updates audit
 // ============================================================
 app.get('/api/updates', (req, res) => {
-  res.json(updates.listRecent({ limit: req.query.limit ? Number(req.query.limit) : 100 }));
+  const { limit, sessionId, actor } = req.query;
+  res.json(updates.listRecent({
+    limit: limit ? Number(limit) : 100,
+    sessionId, actor,
+  }));
 });
 
 app.get('/api/updates/:entityType/:entityId', (req, res) => {
   res.json(updates.listForEntity(req.params.entityType, Number(req.params.entityId)));
+});
+
+// ============================================================
+// Sessions — Who has been operating on this repository?
+// Only mutations (POST/PATCH/DELETE on nodes/edges/sources) write to `updates`,
+// so this endpoint returns exactly the Claude Code sessions (or other clients)
+// that have ever created or modified data. Read-only GETs are NOT tracked.
+// ============================================================
+app.get('/api/sessions', (req, res) => {
+  const limit = req.query.limit ? Number(req.query.limit) : 100;
+  res.json(updates.listSessions({ limit }));
+});
+
+app.get('/api/sessions/:sessionId', (req, res) => {
+  const limit = req.query.limit ? Number(req.query.limit) : 500;
+  res.json(updates.getSessionDetail(req.params.sessionId, { limit }));
 });
 
 // ============================================================
