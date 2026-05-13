@@ -9,13 +9,22 @@ const fs = require('fs');
 const path = require('path');
 const { nodes, edges, sources, db } = require('../lib');
 
-async function run({ analysesDir, asset, date, dryRun = false } = {}) {
+async function run({ analysesDir, asset, date, dryRun = false, audit } = {}) {
   db.open();
   db.migrate();
 
   if (!fs.existsSync(analysesDir)) {
     throw new Error(`analyses dir not found: ${analysesDir}`);
   }
+
+  // The importer is a SCRIPT, but it is OPERATED by a Claude Code session.
+  // Record every row it creates against that session.
+  if (!audit || !audit.sessionId) {
+    throw new Error('importer requires audit context with sessionId — pass via --session-id (CLI) or audit option (library).');
+  }
+  // Attach an importer suffix to the actor label so we can distinguish
+  // "session X used the cli" from "session X operated the importer".
+  audit = { ...audit, actor: `importer:${audit.sessionId}` };
 
   const stats = {
     assets_scanned: 0,
@@ -46,7 +55,7 @@ async function run({ analysesDir, asset, date, dryRun = false } = {}) {
       const fundDir = path.join(assetPath, dt, 'fundamental');
       if (!fs.existsSync(fundDir)) { stats.skipped++; continue; }
       try {
-        await importOneAnalysis({ asset: a, date: dt, fundDir, stats, dryRun });
+        await importOneAnalysis({ asset: a, date: dt, fundDir, stats, dryRun, audit });
       } catch (err) {
         stats.errors.push({ asset: a, date: dt, error: err.message });
       }
@@ -56,7 +65,7 @@ async function run({ analysesDir, asset, date, dryRun = false } = {}) {
   return stats;
 }
 
-async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
+async function importOneAnalysis({ asset, date, fundDir, stats, dryRun, audit }) {
   // We import in dependency order so edges always have endpoints:
   //   factors → sub_factors (derives_from factors) → drivers (cite sub_factors)
   //   → monitors (monitor drivers)
@@ -90,10 +99,10 @@ async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
         status: 'active',
         significance: r.significance, direction: r.impact, magnitude: r.magnitude,
         valid_from: date, props,
-      }, { asset, date, stats, dryRun });
+      }, { asset, date, stats, dryRun, audit });
       factorIds[r.factor] = uid;
       // Attach source citations
-      attachSources(uid, r.source_events, { stats, dryRun });
+      attachSources(uid, r.source_events, { stats, dryRun, audit });
     }
   }
 
@@ -122,9 +131,9 @@ async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
         status: 'active',
         significance: r.significance, direction: r.impact, magnitude: r.magnitude,
         valid_from: date, props,
-      }, { asset, date, stats, dryRun });
+      }, { asset, date, stats, dryRun, audit });
       factorIds[r.factor] = uid;
-      attachSources(uid, r.source_events, { stats, dryRun });
+      attachSources(uid, r.source_events, { stats, dryRun, audit });
     }
   }
 
@@ -150,7 +159,7 @@ async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
         status: 'active',
         certainty: r.predictive_certainty,
         valid_from: date, props,
-      }, { asset, date, stats, dryRun });
+      }, { asset, date, stats, dryRun, audit });
       subFactorIds[r.sub_factor] = uid;
 
       // Edge: sub_factor derives_from parent factor. Sub-factors reference the
@@ -159,9 +168,9 @@ async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
       // dual-blockade"). Try exact match first, then prefix/contains match.
       const parentUid = findParentFactor(r.parent_factor, factorIds);
       if (parentUid) {
-        linkEdge(uid, parentUid, 'derives_from', { stats, dryRun });
+        linkEdge(uid, parentUid, 'derives_from', { stats, dryRun, audit });
       }
-      attachSources(uid, r.source_events, { stats, dryRun });
+      attachSources(uid, r.source_events, { stats, dryRun, audit });
     }
   }
 
@@ -169,7 +178,7 @@ async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
   const driversPath = path.join(fundDir, 'resolution-drivers.md');
   if (fs.existsSync(driversPath)) {
     const tree = parseDriversTree(driversPath);
-    importDriversTree(tree, null, { asset, date, driverIds, subFactorIds, stats, dryRun });
+    importDriversTree(tree, null, { asset, date, driverIds, subFactorIds, stats, dryRun, audit });
   }
 
   // --- 5. Resolution monitors ---
@@ -195,15 +204,15 @@ async function importOneAnalysis({ asset, date, fundDir, stats, dryRun }) {
         asset, body_md: r.signal_meaning || '',
         status: r.status || 'active',
         valid_from: date, props,
-      }, { asset, date, stats, dryRun });
+      }, { asset, date, stats, dryRun, audit });
 
       // Attach to driver — best-effort match by RDn prefix in driver_path
       const driverMatch = (r.driver_path || '').match(/RD\d+/);
       if (driverMatch) {
         const driverUid = driverIds[driverMatch[0]];
-        if (driverUid) linkEdge(uid, driverUid, 'monitors', { stats, dryRun });
+        if (driverUid) linkEdge(uid, driverUid, 'monitors', { stats, dryRun, audit });
       }
-      if (r.source) attachSources(uid, r.source, { stats, dryRun });
+      if (r.source) attachSources(uid, r.source, { stats, dryRun, audit });
     }
   }
 }
@@ -346,12 +355,12 @@ function importDriversTree(node, parentUid, ctx) {
       certainty: child.fields.uncertainty || null,
       eta_date: extractEtaDate(child.fields.resolution_horizon),
       valid_from: ctx.date, props,
-    }, { asset: ctx.asset, date: ctx.date, stats: ctx.stats, dryRun: ctx.dryRun });
+    }, { asset: ctx.asset, date: ctx.date, stats: ctx.stats, dryRun: ctx.dryRun, audit: ctx.audit });
 
     if (driverKey) ctx.driverIds[driverKey] = uid;
 
     if (parentUid) {
-      linkEdge(uid, parentUid, 'parent_of', { stats: ctx.stats, dryRun: ctx.dryRun });
+      linkEdge(uid, parentUid, 'parent_of', { stats: ctx.stats, dryRun: ctx.dryRun, audit: ctx.audit });
     }
 
     // Source events / monitor references in field text
@@ -370,34 +379,37 @@ function extractEtaDate(horizonText) {
 // ============================================================
 // Upsert helpers
 // ============================================================
-function upsertNode(input, { stats, dryRun }) {
+function upsertNode(input, { stats, dryRun, audit }) {
   const existing = nodes.getByUid(input.uid);
   if (dryRun) {
     if (existing) stats.nodes_updated++;
     else stats.nodes_created++;
     return existing || input;
   }
+  const opts = { ...audit, reason: 'lmut markdown import' };
   if (existing) {
-    nodes.update(existing.id, input, { actor: 'importer', reason: 'lmut markdown import' });
+    nodes.update(existing.id, input, opts);
     stats.nodes_updated++;
   } else {
-    nodes.create(input, { actor: 'importer', reason: 'lmut markdown import' });
+    nodes.create(input, opts);
     stats.nodes_created++;
   }
   return input;
 }
 
-function linkEdge(srcUid, dstUid, type, { stats, dryRun }) {
+function linkEdge(srcUid, dstUid, type, { stats, dryRun, audit }) {
   if (dryRun) { stats.edges_created++; return; }
   try {
-    edges.link(srcUid, dstUid, type, { actor: 'importer', reason: 'lmut markdown import' });
+    edges.link(srcUid, dstUid, type, { ...audit, reason: 'lmut markdown import' });
     stats.edges_created++;
   } catch (err) {
-    // ignore duplicate-edge errors quietly
+    // ignore duplicate-edge errors quietly, but re-throw SESSION_REQUIRED so
+    // misconfigured callers don't silently lose attribution.
+    if (err && err.code === 'SESSION_REQUIRED') throw err;
   }
 }
 
-function attachSources(nodeUid, sourceText, { stats, dryRun }) {
+function attachSources(nodeUid, sourceText, { stats, dryRun, audit }) {
   if (!sourceText) return;
   // Extract citation tokens — split on ;, comma, ' + ', ' and ', or pipe
   const tokens = sourceText.split(/[;|]|,\s+/).map(t => t.trim()).filter(Boolean);
@@ -407,8 +419,8 @@ function attachSources(nodeUid, sourceText, { stats, dryRun }) {
     const source = sources.upsert({
       citation: tok,
       source_type: classifyCitation(tok),
-    }, { actor: 'importer' });
-    sources.attach(nodeUid, source.id, { evidence: undefined });
+    }, audit);
+    sources.attach(nodeUid, source.id, audit);
     stats.sources_created++;
   }
 }
@@ -458,19 +470,32 @@ function slugify(text) {
 
 module.exports = { run };
 
-// CLI entry point: `node scripts/import-lmut.js <analyses_dir> [--asset X --date Y --dry-run]`
+// CLI entry point: `node scripts/import-lmut.js <analyses_dir> --session-id <id> [--asset X --date Y --dry-run]`
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (!args.length) {
-    console.error('Usage: import-lmut <analyses_dir> [--asset X] [--date Y] [--dry-run]');
+    console.error('Usage: import-lmut <analyses_dir> --session-id <id> [--asset X] [--date Y] [--project /path] [--tool-use-id <id>] [--dry-run]');
     process.exit(1);
   }
   const opts = { analysesDir: path.resolve(args[0]) };
+  let sessionId = process.env.LER_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+  let projectPath = process.env.LER_PROJECT_PATH || null;
+  let toolUseId = process.env.LER_TOOL_USE_ID || null;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--asset') opts.asset = args[++i];
     else if (args[i] === '--date') opts.date = args[++i];
     else if (args[i] === '--dry-run') opts.dryRun = true;
+    else if (args[i] === '--session-id') sessionId = args[++i];
+    else if (args[i] === '--project') projectPath = args[++i];
+    else if (args[i] === '--tool-use-id') toolUseId = args[++i];
   }
+  if (!sessionId) {
+    console.error('ERROR: --session-id is required.');
+    console.error('       Pass it as --session-id <id>, or set $LER_SESSION_ID / $CLAUDE_SESSION_ID.');
+    console.error('       The importer is a script, but a Claude Code session operates it — that session is recorded against every row.');
+    process.exit(2);
+  }
+  opts.audit = { sessionId, projectPath: projectPath || process.cwd(), toolUseId, actor: `importer:${sessionId}` };
   run(opts).then(stats => {
     console.log(JSON.stringify(stats, null, 2));
   }).catch(err => {

@@ -16,15 +16,18 @@ app.use(cors({
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Session-tracking middleware. Each request can identify which Claude Code
-// session (or other client) initiated the call. Identification flows from
-// (in priority order):
+// Session-tracking middleware. Every mutating request MUST identify the
+// Claude Code session (or other caller) that originated the call. Identification
+// flows from (in priority order):
 //   1. X-Claude-Session-Id / X-Claude-Project / X-Claude-Tool-Use-Id headers
 //   2. Body fields { sessionId, projectPath, toolUseId, actor }
-//   3. Query params (?sessionId=... etc) — useful for GETs that mutate via POST
+//   3. Query params (?sessionId=... etc)
 //
-// The resulting `req.audit` object is passed to every mutator so every row
-// written to the `updates` table is attributable to a specific caller.
+// For mutating methods (POST/PATCH/DELETE) the session id is REQUIRED — the
+// middleware returns 400 SESSION_REQUIRED if none is supplied. Reads (GET)
+// do not require it and are not written to the audit log.
+const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+
 app.use((req, res, next) => {
   const h = req.headers;
   const b = (req.body && typeof req.body === 'object') ? req.body : {};
@@ -34,10 +37,17 @@ app.use((req, res, next) => {
     projectPath: h['x-claude-project'] || h['x-claude-cwd'] || b.projectPath || q.projectPath || null,
     toolUseId: h['x-claude-tool-use-id'] || b.toolUseId || q.toolUseId || null,
     actor: h['x-claude-actor'] || b.actor || q.actor ||
-      // Fallback: derive a stable label from the session id if present, else
-      // "api" if anonymous.
       (h['x-claude-session-id'] ? `session:${h['x-claude-session-id']}` : 'api'),
   };
+
+  // Enforce: every mutating request must identify its session.
+  if (MUTATING_METHODS.has(req.method) && req.path.startsWith('/api/') && !req.audit.sessionId) {
+    return res.status(400).json({
+      error: 'SESSION_REQUIRED',
+      message: 'Mutating requests must include an X-Claude-Session-Id header (or sessionId body/query field). Reads do not require this.',
+      hint: 'Set X-Claude-Session-Id to your Claude Code session id, lm-assist execution id, or any stable caller identifier.',
+    });
+  }
   next();
 });
 

@@ -83,6 +83,19 @@ Nothing in the data is destructive; deletes leave a tombstone in the audit log.
 
 ### Session tracking (who modified this repository?)
 
+**Session identification is MANDATORY for every mutation.** Any create / update
+/ delete / link / unlink — whether from the HTTP API, the CLI, the markdown
+importer, or a direct library call — must carry the Claude Code session id
+that operates it. Mutations without one are rejected:
+
+- HTTP `POST` / `PATCH` / `DELETE` without `X-Claude-Session-Id` → **400 SESSION_REQUIRED**
+- CLI mutation without `--session-id` (and no `$LER_SESSION_ID` / `$CLAUDE_SESSION_ID` env) → exit 2 with a clear message
+- Library mutation called from code without `opts.sessionId` → throws `MissingSessionError`
+- `import-lmut` script (even invoked directly, even from cron) → must receive `--session-id`; the importer is a tool, but a session operates it, and that session is recorded against every row it produces
+
+Read operations (`GET` / `node get` / `node list` / `search` / `graph` / `deps`
+/ `history`) are NOT tracked and do NOT require a session id.
+
 To attribute mutations to a specific Claude Code session (or any identifiable
 caller), pass these headers on every POST / PATCH / DELETE:
 
@@ -238,8 +251,12 @@ The importer walks `analyses/{asset}/{date}/fundamental/` directories and ingest
 Idempotent — re-running on the same asset+date upserts existing rows (and appends to the audit log) rather than duplicating.
 
 ```bash
-ler import-lmut /home/ubuntu/lm-unified-trade/analyses --dry-run
-ler import-lmut /home/ubuntu/lm-unified-trade/analyses --asset brent-oil --date 2026-05-13
+# --session-id is REQUIRED. The importer is a script; the session that runs it
+# is recorded against every row. Use $LER_SESSION_ID or $CLAUDE_SESSION_ID env
+# vars to avoid repeating the flag.
+ler import-lmut /home/ubuntu/lm-unified-trade/analyses --session-id $LER_SESSION_ID --dry-run
+ler import-lmut /home/ubuntu/lm-unified-trade/analyses --session-id <session-id> \
+    --asset brent-oil --date 2026-05-13
 ```
 
 Sample import (Brent oil, May 13, 2026):

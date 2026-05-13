@@ -10,10 +10,34 @@ program
   .name('ler')
   .description('lm-event-resolution — local SQLite event/relationship repository with FTS search')
   .option('--db <path>', 'Path to SQLite database file (overrides $LER_DB)')
+  .option('--session-id <id>', 'Claude Code session id (REQUIRED for mutating commands; falls back to $LER_SESSION_ID or $CLAUDE_SESSION_ID)')
+  .option('--project <path>', 'Originating project / cwd to record in the audit log')
+  .option('--tool-use-id <id>', 'Tool-use correlation id (optional)')
   .hook('preAction', (cmd) => {
     const opts = cmd.optsWithGlobals();
     if (opts.db) process.env.LER_DB = path.resolve(opts.db);
   });
+
+// Mutating commands MUST identify the Claude Code session that operates them.
+// Resolution order: --session-id flag → $LER_SESSION_ID → $CLAUDE_SESSION_ID.
+// If unset, the command exits non-zero. This applies even to scripted callers
+// (e.g. the importer) — every change goes into the audit log with attribution.
+function resolveAuditContext(cmd, { required = true } = {}) {
+  const opts = cmd.optsWithGlobals();
+  const sessionId = opts.sessionId || process.env.LER_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+  if (required && (!sessionId || !sessionId.trim())) {
+    console.error('ERROR: --session-id is required for this command.');
+    console.error('       Provide it via --session-id <id>, $LER_SESSION_ID, or $CLAUDE_SESSION_ID.');
+    console.error('       Every mutation is recorded against the originating Claude Code session.');
+    process.exit(2);
+  }
+  return {
+    sessionId,
+    projectPath: opts.project || process.env.LER_PROJECT_PATH || process.cwd(),
+    toolUseId: opts.toolUseId || process.env.LER_TOOL_USE_ID || null,
+    actor: opts.actor || `cli:${sessionId || 'anon'}`,
+  };
+}
 
 // ----- init / migrate -----
 program.command('init')
@@ -48,8 +72,9 @@ node.command('add')
   .option('--eta-date <date>', 'ISO date — expected resolution date')
   .option('--props <json>', 'JSON object of extra props')
   .option('--reason <text>', 'Reason for the change (audit log)')
-  .option('--actor <name>', 'Actor (audit log)', 'cli')
-  .action((opts) => {
+  .option('--actor <name>', 'Actor label (audit log; defaults to cli:<sessionId>)')
+  .action(function (opts) {
+    const audit = resolveAuditContext(this);
     const body_md = opts.bodyFile ? fs.readFileSync(opts.bodyFile, 'utf8') : opts.body;
     const props = opts.props ? JSON.parse(opts.props) : undefined;
     const created = nodes.create({
@@ -58,7 +83,7 @@ node.command('add')
       significance: opts.significance, direction: opts.direction, magnitude: opts.magnitude,
       temporal: opts.temporal, valid_from: opts.validFrom, valid_to: opts.validTo,
       occurred_at: opts.occurredAt, eta_date: opts.etaDate, props,
-    }, { actor: opts.actor, reason: opts.reason });
+    }, { ...audit, reason: opts.reason });
     console.log(JSON.stringify(created, null, 2));
   });
 
@@ -87,8 +112,9 @@ node.command('update <ref>')
   .option('--eta-date <date>')
   .option('--props <json>')
   .option('--reason <text>')
-  .option('--actor <name>', '', 'cli')
-  .action((ref, opts) => {
+  .option('--actor <name>')
+  .action(function (ref, opts) {
+    const audit = resolveAuditContext(this);
     const patch = {};
     if (opts.name) patch.name = opts.name;
     if (opts.body) patch.body_md = opts.body;
@@ -104,16 +130,17 @@ node.command('update <ref>')
     if (opts.occurredAt) patch.occurred_at = opts.occurredAt;
     if (opts.etaDate) patch.eta_date = opts.etaDate;
     if (opts.props) patch.props = JSON.parse(opts.props);
-    const updated = nodes.update(ref, patch, { actor: opts.actor, reason: opts.reason });
+    const updated = nodes.update(ref, patch, { ...audit, reason: opts.reason });
     console.log(JSON.stringify(updated, null, 2));
   });
 
 node.command('status <ref> <new_status>')
   .description('Set status: active | invalidated | superseded | resolved | confirmed | projected | registered | pending')
   .option('--reason <text>')
-  .option('--actor <name>', '', 'cli')
-  .action((ref, newStatus, opts) => {
-    const updated = nodes.setStatus(ref, newStatus, { actor: opts.actor, reason: opts.reason });
+  .option('--actor <name>')
+  .action(function (ref, newStatus, opts) {
+    const audit = resolveAuditContext(this);
+    const updated = nodes.setStatus(ref, newStatus, { ...audit, reason: opts.reason });
     console.log(`${updated.uid}: status → ${updated.status}`);
   });
 
@@ -150,9 +177,10 @@ node.command('list')
 node.command('remove <ref>')
   .description('Delete a node (audit-logged)')
   .option('--reason <text>')
-  .option('--actor <name>', '', 'cli')
-  .action((ref, opts) => {
-    const ok = nodes.remove(ref, { actor: opts.actor, reason: opts.reason });
+  .option('--actor <name>')
+  .action(function (ref, opts) {
+    const audit = resolveAuditContext(this);
+    const ok = nodes.remove(ref, { ...audit, reason: opts.reason });
     console.log(ok ? 'deleted' : 'not found');
   });
 
@@ -164,12 +192,14 @@ edge.command('link <src> <dst> <type>')
   .option('--weight <n>')
   .option('--props <json>')
   .option('--reason <text>')
-  .option('--actor <name>', '', 'cli')
-  .action((src, dst, type, opts) => {
+  .option('--actor <name>')
+  .action(function (src, dst, type, opts) {
+    const audit = resolveAuditContext(this);
     const e = edges.link(src, dst, type, {
+      ...audit,
       weight: opts.weight,
       props: opts.props ? JSON.parse(opts.props) : undefined,
-      actor: opts.actor, reason: opts.reason,
+      reason: opts.reason,
     });
     console.log(JSON.stringify(e, null, 2));
   });
@@ -177,9 +207,10 @@ edge.command('link <src> <dst> <type>')
 edge.command('unlink <src> <dst> <type>')
   .description('Remove an edge')
   .option('--reason <text>')
-  .option('--actor <name>', '', 'cli')
-  .action((src, dst, type, opts) => {
-    const ok = edges.unlink(src, dst, type, { actor: opts.actor, reason: opts.reason });
+  .option('--actor <name>')
+  .action(function (src, dst, type, opts) {
+    const audit = resolveAuditContext(this);
+    const ok = edges.unlink(src, dst, type, { ...audit, reason: opts.reason });
     console.log(ok ? 'unlinked' : 'edge not found');
   });
 
@@ -202,19 +233,21 @@ source.command('add')
   .option('--type <t>', 'news | official | agency | llm-search | api | analyst')
   .option('--trust <n>', '1-5')
   .option('--notes <text>')
-  .action((opts) => {
+  .action(function (opts) {
+    const audit = resolveAuditContext(this);
     const s = sources.upsert({
       citation: opts.citation, url: opts.url,
       source_type: opts.type, trust_level: opts.trust, notes: opts.notes,
-    });
+    }, audit);
     console.log(JSON.stringify(s, null, 2));
   });
 
 source.command('attach <node_ref> <source_id>')
   .description('Attach a source to a node with optional evidence quote')
   .option('--evidence <text>')
-  .action((nodeRef, sourceId, opts) => {
-    const link = sources.attach(nodeRef, Number(sourceId), { evidence: opts.evidence });
+  .action(function (nodeRef, sourceId, opts) {
+    const audit = resolveAuditContext(this);
+    const link = sources.attach(nodeRef, Number(sourceId), { ...audit, evidence: opts.evidence });
     console.log(link ? JSON.stringify(link, null, 2) : 'already attached');
   });
 
@@ -311,15 +344,17 @@ function truncate(v) {
 
 // ----- importer -----
 program.command('import-lmut <analyses_dir>')
-  .description('Import lm-unified-trade analyses/{asset}/{date}/fundamental into the repo')
+  .description('Import lm-unified-trade analyses/{asset}/{date}/fundamental into the repo. Requires a session id even from scripted callers — the importer is operated BY a Claude Code session, and that session is recorded against every row it creates.')
   .option('--asset <slug>', 'Restrict to a single asset')
   .option('--date <YYYY-MM-DD>', 'Restrict to a single date')
   .option('--dry-run', 'Report what would be imported, do not write')
-  .action(async (analysesDir, opts) => {
+  .action(async function (analysesDir, opts) {
+    const audit = resolveAuditContext(this);
     const importer = require('../scripts/import-lmut');
     const stats = await importer.run({
       analysesDir: path.resolve(analysesDir),
       asset: opts.asset, date: opts.date, dryRun: !!opts.dryRun,
+      audit,
     });
     console.log(JSON.stringify(stats, null, 2));
   });

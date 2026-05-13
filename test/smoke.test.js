@@ -23,7 +23,7 @@ test('node create + audit', () => {
     type: 'event', name: 'Hormuz blockade event',
     asset: 'brent-oil', body_md: 'IRGC laid mines.',
     direction: 'bullish', magnitude: 'major',
-  }, { actor: 'test' });
+  }, { actor: 'test', sessionId: 'smoke-test-session' });
   assert.equal(n.uid, 'test:event:1');
   const h = updates.listForEntity('node', n.id);
   assert.equal(h.length, 1);
@@ -33,8 +33,8 @@ test('node create + audit', () => {
 test('status change is audited as status_change', () => {
   const n = nodes.create({
     uid: 'test:event:2', type: 'event', name: 'Iran V1 proposal',
-  }, { actor: 'test' });
-  nodes.setStatus(n.uid, 'invalidated', { actor: 'test', reason: 'Trump rejected May 2' });
+  }, { actor: 'test', sessionId: 'smoke-test-session' });
+  nodes.setStatus(n.uid, 'invalidated', { actor: 'test', sessionId: 'smoke-test-session', reason: 'Trump rejected May 2' });
   const h = updates.listForEntity('node', n.id);
   assert.equal(h.length, 2);
   assert.equal(h[0].change_type, 'status_change');
@@ -42,12 +42,13 @@ test('status change is audited as status_change', () => {
 });
 
 test('edge link + traverse', () => {
-  const e1 = nodes.create({ uid: 'test:event:3', type: 'event', name: 'Bombing' });
-  const sf = nodes.create({ uid: 'test:sub:1', type: 'sub_factor', name: 'IRGC mine arsenal intact' });
-  const dr = nodes.create({ uid: 'test:drv:1', type: 'driver', name: 'RD-test' });
+  const ctx = { sessionId: 'smoke-test-session' };
+  const e1 = nodes.create({ uid: 'test:event:3', type: 'event', name: 'Bombing' }, ctx);
+  const sf = nodes.create({ uid: 'test:sub:1', type: 'sub_factor', name: 'IRGC mine arsenal intact' }, ctx);
+  const dr = nodes.create({ uid: 'test:drv:1', type: 'driver', name: 'RD-test' }, ctx);
 
-  edges.link(sf.uid, e1.uid, 'derives_from', { actor: 'test' });
-  edges.link(sf.uid, dr.uid, 'supports', { weight: 0.4, actor: 'test' });
+  edges.link(sf.uid, e1.uid, 'derives_from', { actor: 'test', sessionId: 'smoke-test-session' });
+  edges.link(sf.uid, dr.uid, 'supports', { weight: 0.4, actor: 'test', sessionId: 'smoke-test-session' });
 
   const out = edges.listOut(sf.uid);
   assert.equal(out.length, 2);
@@ -57,11 +58,12 @@ test('edge link + traverse', () => {
 });
 
 test('sources upsert + attach', () => {
-  const n = nodes.create({ uid: 'test:event:4', type: 'event', name: 'CPI release' });
+  const ctx = { sessionId: 'smoke-test-session' };
+  const n = nodes.create({ uid: 'test:event:4', type: 'event', name: 'CPI release' }, ctx);
   const s = sources.upsert({
     citation: 'BLS May 12 2026', source_type: 'agency', trust_level: 5,
-  });
-  sources.attach(n.uid, s.id, { evidence: '3.8% YoY headline' });
+  }, ctx);
+  sources.attach(n.uid, s.id, { ...ctx, evidence: '3.8% YoY headline' });
   const list = sources.listForNode(n.uid);
   assert.equal(list.length, 1);
   assert.equal(list[0].evidence, '3.8% YoY headline');
@@ -71,7 +73,7 @@ test('FTS5 search hits markdown body', () => {
   nodes.create({
     uid: 'test:event:5', type: 'event', name: 'Brent rally',
     body_md: 'Brent traded up 2.9% on Hormuz tail re-pricing.',
-  });
+  }, { sessionId: 'smoke-test-session' });
   const hits = search.search('hormuz');
   const found = hits.find(h => h.uid === 'test:event:5');
   assert.ok(found, 'expected to find test:event:5 in search results');
@@ -134,6 +136,35 @@ test('GET endpoints do NOT write to updates (no session pollution from reads)', 
   updates.listSessions();
   const afterCount = db.open().prepare('SELECT COUNT(*) AS n FROM updates').get().n;
   assert.equal(beforeCount, afterCount, 'reads must not write to updates table');
+});
+
+test('mutations WITHOUT sessionId throw SESSION_REQUIRED', () => {
+  // create
+  assert.throws(() => {
+    nodes.create({ uid: 'test:nosession:1', type: 'event', name: 'no session' }, { actor: 'test' });
+  }, /sessionId is required/i);
+
+  // update — first create a node with session, then attempt update without
+  const n = nodes.create({
+    uid: 'test:nosession:2', type: 'event', name: 'has session',
+  }, { actor: 'test', sessionId: 'sess-tmp' });
+  assert.throws(() => {
+    nodes.update(n.uid, { name: 'changed' }, { actor: 'test' });
+  }, /sessionId is required/i);
+
+  // edge link
+  const a = nodes.create({ uid: 'test:nosession:3', type: 'event', name: 'a' },
+    { actor: 'test', sessionId: 'sess-tmp' });
+  const b = nodes.create({ uid: 'test:nosession:4', type: 'event', name: 'b' },
+    { actor: 'test', sessionId: 'sess-tmp' });
+  assert.throws(() => {
+    edges.link(a.uid, b.uid, 'derives_from', { actor: 'test' });
+  }, /sessionId is required/i);
+
+  // source upsert (the audit row write fails when no sessionId)
+  assert.throws(() => {
+    sources.upsert({ citation: 'X-no-session', source_type: 'news' }, { actor: 'test' });
+  }, /sessionId is required/i);
 });
 
 test('cleanup', () => {
