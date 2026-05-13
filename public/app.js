@@ -64,6 +64,7 @@ function route() {
   if (path === '/updates') return renderUpdates();
   if (path === '/sessions') return renderSessions();
   if (path.startsWith('/session/')) return renderSessionDetail(decodeURIComponent(path.slice(9)));
+  if (path === '/dashboard') return renderDashboard();
   if (path === '/stats') return renderStats();
   setHTML(app, '<div class="card">Not found: ' + esc(path) + '</div>');
 }
@@ -341,10 +342,14 @@ function renderUpdateRows(rows) {
     const sessionLink = r.session_id
       ? ' · <a href="#/session/' + encodeURIComponent(r.session_id) + '">session ' + esc(short(r.session_id)) + '</a>'
       : '';
+    const intentPill = r.intent
+      ? '<span class="intent-pill" title="intent">' + esc(r.intent) + '</span>'
+      : '';
     return '<div class="update-row"><span class="ut">' + esc(r.created_at) + '</span> · <span class="uchange">' + esc(r.change_type) + '</span> · <span>' + esc(r.entity_type) + ' #' + r.entity_id + '</span>' +
       sessionLink +
       (r.actor ? ' · by ' + esc(r.actor) : '') +
-      (r.reason ? ' · ' + esc(r.reason) : '') +
+      ' ' + intentPill +
+      (r.reason ? '<div class="meta">reason: ' + esc(r.reason) + '</div>' : '') +
       (r.project_path ? '<div class="meta">project: ' + esc(r.project_path) + '</div>' : '') +
       (diff ? '<div class="udiff">' + diff + '</div>' : '') + '</div>';
   }).join('');

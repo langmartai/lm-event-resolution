@@ -11,6 +11,7 @@ program
   .description('lm-event-resolution — local SQLite event/relationship repository with FTS search')
   .option('--db <path>', 'Path to SQLite database file (overrides $LER_DB)')
   .option('--session-id <id>', 'Claude Code session id (REQUIRED for mutating commands; falls back to $LER_SESSION_ID or $CLAUDE_SESSION_ID)')
+  .option('--intent <text>', 'Why this action is happening (REQUIRED for mutating commands; falls back to $LER_INTENT)')
   .option('--project <path>', 'Originating project / cwd to record in the audit log')
   .option('--tool-use-id <id>', 'Tool-use correlation id (optional)')
   .hook('preAction', (cmd) => {
@@ -25,14 +26,25 @@ program
 function resolveAuditContext(cmd, { required = true } = {}) {
   const opts = cmd.optsWithGlobals();
   const sessionId = opts.sessionId || process.env.LER_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+  const intent = opts.intent || process.env.LER_INTENT || null;
   if (required && (!sessionId || !sessionId.trim())) {
     console.error('ERROR: --session-id is required for this command.');
     console.error('       Provide it via --session-id <id>, $LER_SESSION_ID, or $CLAUDE_SESSION_ID.');
     console.error('       Every mutation is recorded against the originating Claude Code session.');
     process.exit(2);
   }
+  if (required && (!intent || !String(intent).trim())) {
+    console.error('ERROR: --intent is required for this command.');
+    console.error('       Provide it via --intent "<text>" or $LER_INTENT.');
+    console.error('       Describe WHY this action is happening — examples:');
+    console.error('         "trade-monitor brent-oil refresh"');
+    console.error('         "resolve RD1 after Iran ceasefire collapse"');
+    console.error('         "nightly fundamental import"');
+    process.exit(2);
+  }
   return {
     sessionId,
+    intent,
     projectPath: opts.project || process.env.LER_PROJECT_PATH || process.cwd(),
     toolUseId: opts.toolUseId || process.env.LER_TOOL_USE_ID || null,
     actor: opts.actor || `cli:${sessionId || 'anon'}`,

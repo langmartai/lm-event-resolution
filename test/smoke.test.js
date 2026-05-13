@@ -23,7 +23,7 @@ test('node create + audit', () => {
     type: 'event', name: 'Hormuz blockade event',
     asset: 'brent-oil', body_md: 'IRGC laid mines.',
     direction: 'bullish', magnitude: 'major',
-  }, { actor: 'test', sessionId: 'smoke-test-session' });
+  }, { actor: 'test', sessionId: 'smoke-test-session', intent: 'smoke test' });
   assert.equal(n.uid, 'test:event:1');
   const h = updates.listForEntity('node', n.id);
   assert.equal(h.length, 1);
@@ -33,8 +33,8 @@ test('node create + audit', () => {
 test('status change is audited as status_change', () => {
   const n = nodes.create({
     uid: 'test:event:2', type: 'event', name: 'Iran V1 proposal',
-  }, { actor: 'test', sessionId: 'smoke-test-session' });
-  nodes.setStatus(n.uid, 'invalidated', { actor: 'test', sessionId: 'smoke-test-session', reason: 'Trump rejected May 2' });
+  }, { actor: 'test', sessionId: 'smoke-test-session', intent: 'smoke test' });
+  nodes.setStatus(n.uid, 'invalidated', { actor: 'test', sessionId: 'smoke-test-session', intent: 'smoke test', reason: 'Trump rejected May 2' });
   const h = updates.listForEntity('node', n.id);
   assert.equal(h.length, 2);
   assert.equal(h[0].change_type, 'status_change');
@@ -42,13 +42,13 @@ test('status change is audited as status_change', () => {
 });
 
 test('edge link + traverse', () => {
-  const ctx = { sessionId: 'smoke-test-session' };
+  const ctx = { sessionId: 'smoke-test-session', intent: 'smoke test' };
   const e1 = nodes.create({ uid: 'test:event:3', type: 'event', name: 'Bombing' }, ctx);
   const sf = nodes.create({ uid: 'test:sub:1', type: 'sub_factor', name: 'IRGC mine arsenal intact' }, ctx);
   const dr = nodes.create({ uid: 'test:drv:1', type: 'driver', name: 'RD-test' }, ctx);
 
-  edges.link(sf.uid, e1.uid, 'derives_from', { actor: 'test', sessionId: 'smoke-test-session' });
-  edges.link(sf.uid, dr.uid, 'supports', { weight: 0.4, actor: 'test', sessionId: 'smoke-test-session' });
+  edges.link(sf.uid, e1.uid, 'derives_from', { actor: 'test', sessionId: 'smoke-test-session', intent: 'smoke test' });
+  edges.link(sf.uid, dr.uid, 'supports', { weight: 0.4, actor: 'test', sessionId: 'smoke-test-session', intent: 'smoke test' });
 
   const out = edges.listOut(sf.uid);
   assert.equal(out.length, 2);
@@ -58,7 +58,7 @@ test('edge link + traverse', () => {
 });
 
 test('sources upsert + attach', () => {
-  const ctx = { sessionId: 'smoke-test-session' };
+  const ctx = { sessionId: 'smoke-test-session', intent: 'smoke test' };
   const n = nodes.create({ uid: 'test:event:4', type: 'event', name: 'CPI release' }, ctx);
   const s = sources.upsert({
     citation: 'BLS May 12 2026', source_type: 'agency', trust_level: 5,
@@ -73,7 +73,7 @@ test('FTS5 search hits markdown body', () => {
   nodes.create({
     uid: 'test:event:5', type: 'event', name: 'Brent rally',
     body_md: 'Brent traded up 2.9% on Hormuz tail re-pricing.',
-  }, { sessionId: 'smoke-test-session' });
+  }, { sessionId: 'smoke-test-session', intent: 'smoke test' });
   const hits = search.search('hormuz');
   const found = hits.find(h => h.uid === 'test:event:5');
   assert.ok(found, 'expected to find test:event:5 in search results');
@@ -90,12 +90,14 @@ test('session_id is persisted on every mutation', () => {
   }, {
     actor: 'test',
     sessionId: 'exec-test-session-42',
+    intent: 'session test',
     projectPath: '/tmp/lm-event-resolution',
     toolUseId: 'toolu_xyz',
   });
   nodes.update(n.uid, { status: 'confirmed' }, {
     actor: 'test',
     sessionId: 'exec-test-session-42',
+    intent: 'session test',
     projectPath: '/tmp/lm-event-resolution',
   });
   const h = updates.listForEntity('node', n.id);
@@ -103,6 +105,7 @@ test('session_id is persisted on every mutation', () => {
   for (const row of h) {
     assert.equal(row.session_id, 'exec-test-session-42');
     assert.equal(row.project_path, '/tmp/lm-event-resolution');
+    assert.equal(row.intent, 'session test');
   }
 });
 
@@ -111,7 +114,7 @@ test('listSessions groups by session_id, returns paginated envelope', () => {
   nodes.create({
     uid: 'test:session:2', type: 'event', name: 'second session event',
   }, {
-    actor: 'test', sessionId: 'exec-other-session-99',
+    actor: 'test', sessionId: 'exec-other-session-99', intent: 'session test',
   });
   const page = updates.listSessions({ limit: 10 });
   assert.ok(Array.isArray(page.items));
@@ -125,7 +128,7 @@ test('listSessions supports sort by update_count desc', () => {
   // Create another mutation on exec-test-session-42 so it has more updates than -99.
   nodes.create({
     uid: 'test:session:3', type: 'event', name: 'third event',
-  }, { actor: 'test', sessionId: 'exec-test-session-42' });
+  }, { actor: 'test', sessionId: 'exec-test-session-42', intent: 'session test' });
   const page = updates.listSessions({ sort: 'update_count', order: 'desc' });
   // We can't assert which session is #1 — earlier tests created many nodes
   // under smoke-test-session, so it likely tops the chart. But we CAN assert
@@ -165,6 +168,25 @@ test('GET endpoints do NOT write to updates (no session pollution from reads)', 
   assert.equal(beforeCount, afterCount, 'reads must not write to updates table');
 });
 
+test('mutations WITHOUT intent throw INTENT_REQUIRED', () => {
+  assert.throws(() => {
+    nodes.create({ uid: 'test:nointent:1', type: 'event', name: 'has session, no intent' },
+      { actor: 'test', sessionId: 'sess-x' });
+  }, /intent is required/i);
+});
+
+test('FTS5 search hits props (search "L1" finds certainty=L1 sub_factors)', () => {
+  nodes.create({
+    uid: 'test:fts:1', type: 'sub_factor', name: 'certainty test',
+    certainty: 'L1', props: { credibility_type: 'physical', evidence: 'arithmetic verified' },
+  }, { actor: 'test', sessionId: 'smoke-test-session', intent: 'smoke test' });
+  const hits = search.search('L1', { type: 'sub_factor' });
+  assert.ok(hits.find(h => h.uid === 'test:fts:1'), 'should find via certainty value');
+  // Also: search by evidence text in props
+  const hits2 = search.search('arithmetic');
+  assert.ok(hits2.find(h => h.uid === 'test:fts:1'), 'should find via props evidence text');
+});
+
 test('mutations WITHOUT sessionId throw SESSION_REQUIRED', () => {
   // create
   assert.throws(() => {
@@ -174,16 +196,16 @@ test('mutations WITHOUT sessionId throw SESSION_REQUIRED', () => {
   // update — first create a node with session, then attempt update without
   const n = nodes.create({
     uid: 'test:nosession:2', type: 'event', name: 'has session',
-  }, { actor: 'test', sessionId: 'sess-tmp' });
+  }, { actor: 'test', sessionId: 'sess-tmp', intent: 'session test' });
   assert.throws(() => {
     nodes.update(n.uid, { name: 'changed' }, { actor: 'test' });
   }, /sessionId is required/i);
 
   // edge link
   const a = nodes.create({ uid: 'test:nosession:3', type: 'event', name: 'a' },
-    { actor: 'test', sessionId: 'sess-tmp' });
+    { actor: 'test', sessionId: 'sess-tmp', intent: 'session test' });
   const b = nodes.create({ uid: 'test:nosession:4', type: 'event', name: 'b' },
-    { actor: 'test', sessionId: 'sess-tmp' });
+    { actor: 'test', sessionId: 'sess-tmp', intent: 'session test' });
   assert.throws(() => {
     edges.link(a.uid, b.uid, 'derives_from', { actor: 'test' });
   }, /sessionId is required/i);

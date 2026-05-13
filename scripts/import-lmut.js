@@ -18,9 +18,12 @@ async function run({ analysesDir, asset, date, dryRun = false, audit } = {}) {
   }
 
   // The importer is a SCRIPT, but it is OPERATED by a Claude Code session.
-  // Record every row it creates against that session.
+  // Record every row it creates against that session AND that session's intent.
   if (!audit || !audit.sessionId) {
     throw new Error('importer requires audit context with sessionId — pass via --session-id (CLI) or audit option (library).');
+  }
+  if (!audit.intent) {
+    throw new Error('importer requires audit context with intent — pass via --intent (CLI) or audit option (library). Describe WHY this import is running.');
   }
   // Attach an importer suffix to the actor label so we can distinguish
   // "session X used the cli" from "session X operated the importer".
@@ -386,6 +389,16 @@ function upsertNode(input, { stats, dryRun, audit }) {
     else stats.nodes_created++;
     return existing || input;
   }
+  // Markdown analyses sometimes use freeform status strings ("active — CRITICAL",
+  // "TRIGGERED-MAJOR-CORRECTION", "watch", etc) that don't match the DB enum.
+  // Stash the raw value in props.status_raw and normalise to a valid status so
+  // the import doesn't lose a whole analysis to one stray row.
+  if (input.status && !nodes.VALID_STATUSES.has(input.status)) {
+    const raw = input.status;
+    const normalised = normaliseStatus(raw);
+    input.props = { ...(input.props || {}), status_raw: raw };
+    input.status = normalised;
+  }
   const opts = { ...audit, reason: 'lmut markdown import' };
   if (existing) {
     nodes.update(existing.id, input, opts);
@@ -395,6 +408,23 @@ function upsertNode(input, { stats, dryRun, audit }) {
     stats.nodes_created++;
   }
   return input;
+}
+
+function normaliseStatus(raw) {
+  const s = String(raw).toLowerCase();
+  if (s.includes('triggered')) return 'triggered';
+  if (s.startsWith('active'))  return 'active';
+  if (s.startsWith('armed'))   return 'armed';
+  if (s.startsWith('expired')) return 'expired';
+  if (s.startsWith('resolved')) return 'resolved';
+  if (s.startsWith('invalid')) return 'invalidated';
+  if (s.startsWith('supers'))  return 'superseded';
+  if (s.startsWith('confirm')) return 'confirmed';
+  if (s.startsWith('project')) return 'projected';
+  if (s.startsWith('register')) return 'registered';
+  if (s.startsWith('pending'))  return 'pending';
+  if (s.startsWith('watch'))    return 'armed';   // watch ~ armed monitor
+  return 'active';
 }
 
 function linkEdge(srcUid, dstUid, type, { stats, dryRun, audit }) {
@@ -474,11 +504,12 @@ module.exports = { run };
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (!args.length) {
-    console.error('Usage: import-lmut <analyses_dir> --session-id <id> [--asset X] [--date Y] [--project /path] [--tool-use-id <id>] [--dry-run]');
+    console.error('Usage: import-lmut <analyses_dir> --session-id <id> --intent <text> [--asset X] [--date Y] [--project /path] [--tool-use-id <id>] [--dry-run]');
     process.exit(1);
   }
   const opts = { analysesDir: path.resolve(args[0]) };
   let sessionId = process.env.LER_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+  let intent = process.env.LER_INTENT || null;
   let projectPath = process.env.LER_PROJECT_PATH || null;
   let toolUseId = process.env.LER_TOOL_USE_ID || null;
   for (let i = 1; i < args.length; i++) {
@@ -486,16 +517,22 @@ if (require.main === module) {
     else if (args[i] === '--date') opts.date = args[++i];
     else if (args[i] === '--dry-run') opts.dryRun = true;
     else if (args[i] === '--session-id') sessionId = args[++i];
+    else if (args[i] === '--intent') intent = args[++i];
     else if (args[i] === '--project') projectPath = args[++i];
     else if (args[i] === '--tool-use-id') toolUseId = args[++i];
   }
   if (!sessionId) {
     console.error('ERROR: --session-id is required.');
     console.error('       Pass it as --session-id <id>, or set $LER_SESSION_ID / $CLAUDE_SESSION_ID.');
-    console.error('       The importer is a script, but a Claude Code session operates it — that session is recorded against every row.');
     process.exit(2);
   }
-  opts.audit = { sessionId, projectPath: projectPath || process.cwd(), toolUseId, actor: `importer:${sessionId}` };
+  if (!intent) {
+    console.error('ERROR: --intent is required.');
+    console.error('       Pass it as --intent "<text>", or set $LER_INTENT.');
+    console.error('       Describe WHY this import is running — e.g. "nightly brent-oil refresh".');
+    process.exit(2);
+  }
+  opts.audit = { sessionId, intent, projectPath: projectPath || process.cwd(), toolUseId, actor: `importer:${sessionId}` };
   run(opts).then(stats => {
     console.log(JSON.stringify(stats, null, 2));
   }).catch(err => {

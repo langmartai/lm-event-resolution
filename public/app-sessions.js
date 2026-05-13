@@ -39,6 +39,7 @@ async function renderSessions() {
         '<strong>' + s.nodes_touched + '</strong> nodes · ' +
         'first ' + esc(s.first_seen) + ' · last ' + esc(s.last_seen) +
       '</div>' +
+      (s.intents ? '<div class="meta">intent: <span class="intent-pill">' + esc(s.intents) + '</span></div>' : '') +
       (s.actors ? '<div class="meta">actors: ' + esc(s.actors) + '</div>' : '') +
       (s.project_paths ? '<div class="meta">project: ' + esc(s.project_paths) + '</div>' : '') +
     '</li>';
@@ -76,6 +77,12 @@ async function renderSessionDetail(sessionId) {
   // Breakdown rows
   const ctRows = (d.byChangeType || []).map(function(r) { return { label: r.change_type, n: r.n }; });
   const etRows = (d.byEntityType || []).map(function(r) { return { label: r.entity_type, n: r.n }; });
+  const intents = d.intents || [];
+  const intentsTile = intents.length === 0
+    ? '<div class="meta">No intents recorded.</div>'
+    : intents.slice(0, 5).map(function(i) {
+        return '<div class="tile-sub"><span class="intent-pill">' + esc(i.intent) + '</span> ' + i.n + '</div>';
+      }).join('');
 
   // Dashboard tile grid
   const tiles =
@@ -92,6 +99,10 @@ async function renderSessionDetail(sessionId) {
       '<div class="tile">' +
         '<div class="tile-label">By entity</div>' +
         renderMiniBars(etRows) +
+      '</div>' +
+      '<div class="tile">' +
+        '<div class="tile-label">Intents recorded</div>' +
+        intentsTile +
       '</div>' +
       '<div class="tile">' +
         '<div class="tile-label">Active window</div>' +

@@ -30,11 +30,15 @@ header {
 header h1 { margin: 0 0 8px 0; font-size: 17px; font-weight: 600; }
 header h1 a { color: var(--fg); }
 
-form#searchForm { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+form#searchForm {
+  display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+  flex-wrap: wrap;
+  max-width: 1100px;     /* keep the input + filter row compact on the left */
+}
 form#searchForm input[type=search] {
-  flex: 1; min-width: 220px;
+  flex: 1 1 320px; min-width: 220px; max-width: 520px;
   background: var(--panel-2); color: var(--fg);
-  border: 1px solid var(--border); padding: 7px 10px; border-radius: 6px;
+  border: 1px solid var(--border); padding: 8px 11px; border-radius: 6px;
 }
 form#searchForm select {
   background: var(--panel-2); color: var(--fg);
@@ -60,13 +64,17 @@ main {
   main { padding: 24px 40px 40px 40px; }
 }
 
-/* Page header — title + helper text + controls in a single row. */
+/* Page header — title + helper text stacked on the LEFT, optional badge row
+   below. No space-between (which pushed the sub-text to the right edge on
+   wide screens and looked disconnected). */
 .page-header {
-  display: flex; justify-content: space-between; align-items: flex-end;
-  flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px;
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: 4px; margin-bottom: 14px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border);
 }
-.page-header h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.page-header h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
 .page-header .sub { color: var(--muted); font-size: 12px; }
+.page-header .badge-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 
 /* Dashboard tiles — small cards in a responsive grid that fills the page width. */
 .tile-grid {
@@ -95,14 +103,26 @@ footer {
 
 mark { background: var(--hl); color: #1a1a1a; padding: 1px 2px; border-radius: 2px; }
 
-/* Cards */
+/* Cards — full width inside their parent. Long text inside is capped via
+   .body-md / specific .card-content rules. */
 .card {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: 8px; padding: 14px 16px; margin-bottom: 12px;
+  border-radius: 8px; padding: 14px 18px; margin-bottom: 14px;
 }
-.card h3 { margin: 0 0 8px 0; font-size: 14px; font-weight: 600; }
+.card h3 {
+  margin: 0 0 10px 0; font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+}
 .card .meta { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-.card pre { background: var(--panel-2); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.card pre {
+  background: var(--panel-2); padding: 10px 12px; border-radius: 6px;
+  overflow-x: auto; font-size: 12px; max-width: 100%;
+}
+/* When two cards sit side by side inside a grid, keep them sane. */
+.card-row {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
 .snippet { color: var(--muted); font-size: 13px; }
 .snippet mark { background: var(--hl); color: #1a1a1a; }
 
@@ -157,11 +177,23 @@ ul.results li .meta { color: var(--muted); font-size: 12px; }
 @media (min-width: 1600px) { .detail-grid { grid-template-columns: minmax(0, 1fr) 440px; } }
 @media (max-width: 900px)  { .detail-grid { grid-template-columns: 1fr; } }
 
-.kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 13px; }
-.kv .k { color: var(--muted); }
-.kv .v { color: var(--fg); }
+.kv {
+  display: grid; grid-template-columns: 130px minmax(0, 1fr);
+  gap: 6px 14px; font-size: 13px; max-width: 900px;
+}
+.kv .k { color: var(--muted); padding-right: 8px; }
+.kv .v { color: var(--fg); word-break: break-word; }
 
-.body-md { margin-top: 12px; padding: 10px; background: var(--panel-2); border-radius: 6px; white-space: pre-wrap; font-size: 13px; line-height: 1.55; }
+/* Long prose / pre blocks — cap reading width so 4K screens don't produce
+   200-character lines. The container card can still span full width; the
+   text inside has its own ceiling. */
+.body-md {
+  margin-top: 12px; padding: 12px 14px;
+  background: var(--panel-2); border-radius: 6px;
+  white-space: pre-wrap; font-size: 13px; line-height: 1.6;
+  max-width: 95ch;
+}
+.card pre { max-width: 100%; }
 
 .edge-list { display: flex; flex-direction: column; gap: 6px; }
 .edge-row { background: var(--panel-2); padding: 8px 10px; border-radius: 6px; font-size: 12px; }
@@ -233,6 +265,26 @@ table.stats th { color: var(--muted); font-weight: 500; font-size: 12px; text-tr
 .entity-group .eg-pill.t-delete { color: #fda4af; border-color: #b91c1c; }
 .entity-group .eg-pill.t-link { color: #c4b5fd; border-color: #6d28d9; }
 .entity-group .eg-pill.t-unlink { color: #cbd5e1; border-color: #475569; }
+
+/* Dashboard activity bars — 14-day mini chart */
+.activity-bars {
+  display: grid; grid-template-columns: repeat(14, minmax(36px, 1fr));
+  gap: 4px; align-items: end; height: 100px;
+  background: var(--panel-2); border-radius: 6px; padding: 8px 10px;
+}
+.activity-bars .abar { display: flex; flex-direction: column; height: 100%; justify-content: flex-end; align-items: center; }
+.activity-bars .abar-fill {
+  width: 80%; background: var(--accent); border-radius: 3px 3px 0 0;
+  min-height: 2px; transition: height 0.2s;
+}
+.activity-bars .abar-label { font-size: 10px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+/* Intent pill — small surfaced label for "why" in update rows. */
+.intent-pill {
+  background: #4338ca33; color: #c4b5fd; border: 1px solid #4338ca;
+  padding: 1px 7px; border-radius: 3px; font-size: 11px; font-weight: 500;
+  margin-left: 4px; display: inline-block;
+}
 
 /* Spinner */
 .spinner { color: var(--muted); padding: 20px; text-align: center; }

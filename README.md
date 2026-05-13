@@ -83,15 +83,28 @@ Nothing in the data is destructive; deletes leave a tombstone in the audit log.
 
 ### Session tracking (who modified this repository?)
 
-**Session identification is MANDATORY for every mutation.** Any create / update
-/ delete / link / unlink — whether from the HTTP API, the CLI, the markdown
-importer, or a direct library call — must carry the Claude Code session id
-that operates it. Mutations without one are rejected:
+**Session identification AND intent are MANDATORY for every mutation.** Any
+create / update / delete / link / unlink — whether from the HTTP API, the
+CLI, the markdown importer, or a direct library call — must carry both:
+
+1. The Claude Code session id that operates it (`X-Claude-Session-Id` / `--session-id`)
+2. The intent of the action — WHY this session is doing this (`X-Claude-Intent` / `--intent`)
+
+Mutations without either are rejected at the boundary:
 
 - HTTP `POST` / `PATCH` / `DELETE` without `X-Claude-Session-Id` → **400 SESSION_REQUIRED**
+- HTTP `POST` / `PATCH` / `DELETE` without `X-Claude-Intent` → **400 INTENT_REQUIRED**
 - CLI mutation without `--session-id` (and no `$LER_SESSION_ID` / `$CLAUDE_SESSION_ID` env) → exit 2 with a clear message
-- Library mutation called from code without `opts.sessionId` → throws `MissingSessionError`
-- `import-lmut` script (even invoked directly, even from cron) → must receive `--session-id`; the importer is a tool, but a session operates it, and that session is recorded against every row it produces
+- CLI mutation without `--intent` (and no `$LER_INTENT` env) → exit 2
+- Library mutation without `opts.sessionId` → throws `MissingSessionError` (code `SESSION_REQUIRED`)
+- Library mutation without `opts.intent` → throws `MissingIntentError` (code `INTENT_REQUIRED`)
+- `import-lmut` script (even invoked directly, even from cron) → must receive both `--session-id` and `--intent`
+
+Intent examples:
+- `"trade-monitor brent-oil refresh"`
+- `"resolve RD1 — Iran ceasefire collapsed"`
+- `"nightly fundamental analysis import"`
+- `"manual cleanup of stale monitors"`
 
 Read operations (`GET` / `node get` / `node list` / `search` / `graph` / `deps`
 / `history`) are NOT tracked and do NOT require a session id.
@@ -238,6 +251,7 @@ restrict to loopback.
 | GET    | `/api/deps/:ref`                      | Dependency tree rooted at this node                           |
 | GET    | `/api/updates`                        | Audit-log entries — filters: `limit`, `offset`, `sessionId`, `actor`, `sort`, `order` |
 | GET    | `/api/updates/:entityType/:entityId`  | Full audit history for one entity                             |
+| GET    | `/api/dashboard`                      | Single-shot aggregate for the dashboard UI — counts, DB health (size/page count/integrity/sqlite version/journal mode), query-latency timings, breakdowns (type/status/certainty/asset/direction), top sessions, top-touched nodes, ETA-soon (next 30 days), stale (Valid To passed), intent log, last-14-days activity histogram, recent mutations |
 | GET    | `/api/sessions`                       | Sessions that mutated data — paginated. Params: `limit`, `offset`, `sort` (`last_seen`/`first_seen`/`update_count`/`nodes_touched`/`session_id`), `order` (`asc`/`desc`) |
 | GET    | `/api/sessions/:sessionId`            | Summary + breakdown (by change_type + entity_type) + nodes touched + paginated update timeline. Same `limit`/`offset`/`sort`/`order` |
 | GET    | `/api/nodes/:ref/sessions`            | All sessions that have touched this node (touches, first/last seen, change types) |
@@ -263,13 +277,14 @@ Calls without the header (or a `sessionId` field in the body/query) return
 | Header                   | Required?            | Purpose                                                  |
 |--------------------------|----------------------|----------------------------------------------------------|
 | `X-Claude-Session-Id`    | **yes (mutations)**  | Stable session ID — e.g. lm-assist `exec-…`, Claude Code session id |
+| `X-Claude-Intent`        | **yes (mutations)**  | Why this action is happening (free text)                 |
 | `X-Claude-Project`       | optional             | Originating project / cwd                                |
 | `X-Claude-Tool-Use-Id`   | optional             | Correlation id for a specific tool invocation            |
 | `X-Claude-Actor`         | optional             | Display label (default: `session:<id>`)                  |
 | `Content-Type`           | `application/json` for POST/PATCH | —                                            |
 
-Body / query fields `sessionId`, `projectPath`, `toolUseId`, `actor` are
-accepted as fallbacks if you cannot set headers.
+Body / query fields `sessionId`, `intent`, `projectPath`, `toolUseId`, `actor`
+are accepted as fallbacks if you cannot set headers.
 
 ### Examples
 
@@ -279,6 +294,7 @@ Successful mutation (writes audit row attributed to the session):
 curl -X POST http://localhost:4100/api/nodes \
   -H "Content-Type: application/json" \
   -H "X-Claude-Session-Id: exec-1773287494272" \
+  -H "X-Claude-Intent: trade-monitor brent-oil — add new event after CPI release" \
   -H "X-Claude-Project: /home/ubuntu/lm-unified-trade" \
   -d '{"uid":"brent-oil:2026-05-14:event:new","type":"event","name":"…","reason":"trade-monitor run"}'
 # → 201 Created
@@ -310,8 +326,18 @@ curl http://localhost:4100/api/sessions                 # → 200 OK (list of at
 
 `/` (index.html) hosts a single-page browser with:
 
-- **Home** — dashboard tiles for total nodes/edges/sources/audit entries + recent activity
-- Full-text search box with type / asset / status filters
+- **Home** — tiles for total nodes/edges/sources/audit entries + recent activity
+- **Dashboard** — system-wide health view:
+  - Tile row: nodes / edges / sources / audit entries / sessions
+  - Database health: DB size, WAL size, page count, integrity check, schema versions, SQLite version, journal mode, FK status
+  - Query latency tiles (live timings for representative SELECTs and FTS searches)
+  - 14-day activity histogram (one bar per UTC day)
+  - Breakdown panels: by type / status / certainty (each tile links into a filtered node list)
+  - Top-touched nodes and top sessions (by activity)
+  - Upcoming resolutions (ETA in next 30 days) and stale entries (Valid To has passed)
+  - Intent log — distinct intents grouped by occurrence count
+  - Recent mutations timeline (with intent pill on each row)
+- Full-text search box with type / asset / status filters — now also searches over **props** (evidence, causal_history, projection_basis, quantified_impact, …), **certainty** (L1–L5), **status** (active/armed/triggered/…), and direction/magnitude/significance — not just name + body_md
 - **Nodes** tab — browse by type (events, factors, sub-factors, drivers, monitors, scenarios); sortable columns + paginated
 - **Node detail** — three-card grid: details + sources + audit history on the left; *sessions that touched this node* + outgoing edges + incoming edges + dependency neighborhood on the right. Every update row in the history links to the session that made the change.
 - **Recent updates** — sortable + paginated timeline of every mutation
