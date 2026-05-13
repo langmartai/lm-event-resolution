@@ -233,7 +233,8 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`lm-event-resolution listening on http://localhost:${PORT}`);
+const HOST = process.env.LER_HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`lm-event-resolution listening on http://${HOST}:${PORT}`);
   console.log(`Database: ${db.open().name}`);
 });
