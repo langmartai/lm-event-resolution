@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>lm-event-resolution</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1><a href="#/">lm-event-resolution</a></h1>
+    <form id="searchForm">
+      <input type="search" id="searchInput" placeholder="Search events, drivers, monitors…" autocomplete="off" />
+      <select id="filterType">
+        <option value="">all types</option>
+      </select>
+      <select id="filterAsset">
+        <option value="">all assets</option>
+      </select>
+      <select id="filterStatus">
+        <option value="">all statuses</option>
+      </select>
+      <button type="submit">Search</button>
+    </form>
+    <nav id="topnav">
+      <a href="#/" class="active">Home</a>
+      <a href="#/nodes">Nodes</a>
+      <a href="#/updates">Recent updates</a>
+      <a href="#/stats">Stats</a>
+    </nav>
+  </header>
+
+  <main id="app"></main>
+
+  <footer>
+    <span id="health"></span>
+    <span>·</span>
+    <span><a href="https://github.com/langmartai/lm-event-resolution" target="_blank">GitHub</a></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

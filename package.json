@@ -1,0 +1,29 @@
+{
+  "name": "lm-event-resolution",
+  "version": "0.1.0",
+  "description": "Event relationship and forecast repository — SQLite-backed graph of events, sub-factors, resolution drivers, monitors, and scenarios with full source/update/status/dependency tracking and FTS5 search",
+  "main": "lib/index.js",
+  "bin": {
+    "ler": "bin/ler.js"
+  },
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node --test test/",
+    "init-db": "node bin/ler.js init"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "commander": "^12.1.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "marked": "^14.1.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/langmartai/lm-event-resolution.git"
+  }
+}
