@@ -260,11 +260,72 @@ test('vocabulary merge consolidates observations', () => {
   assert.equal(b_after.merged_into_id, a.id);
 });
 
-test('bad concept_key on create is rejected', () => {
-  const ctx = { sessionId: 'smoke-test-session', intent: 'smoke test reject' };
-  assert.throws(() => {
-    nodes.create({ uid: 'bad:1', type: 'event', name: 'bad', concept_key: 'does-not-exist' }, ctx);
-  }, /concept_key not in vocabulary/);
+test('unknown concept_key is auto-created on write (permissive mode)', () => {
+  const ctx = { sessionId: 'smoke-test-session', intent: 'permissive write test' };
+  const { vocabulary } = require('../lib');
+  // Pre-condition: this key doesn't exist
+  assert.equal(vocabulary.getByKey('concept:brent-oil:fresh-permissive-term'), null);
+  const n = nodes.create({
+    uid: 'permissive:1', type: 'event', name: 'Fresh permissive term observation',
+    asset: 'brent-oil',
+    concept_key: 'concept:brent-oil:fresh-permissive-term',
+  }, ctx);
+  // The concept now exists, auto_registered=true, linked to this node
+  const v = vocabulary.getByKey('concept:brent-oil:fresh-permissive-term');
+  assert.ok(v, 'unknown concept_key should be auto-created');
+  assert.equal(v.auto_registered, true);
+  assert.equal(n.concept_id, v.id);
+});
+
+test('vocabulary.resolve follows merged_into_id chain', () => {
+  const { vocabulary } = require('../lib');
+  const ctx = { sessionId: 'smoke-test-session', intent: 'resolve chain test' };
+  const a = vocabulary.register({ type: 'concept', label: 'Canonical A' }, ctx);
+  const b = vocabulary.register({ type: 'concept', label: 'Alias B' }, ctx);
+  vocabulary.merge(a.key, b.key, ctx);
+  // Asking for b should resolve to a
+  const resolved = vocabulary.resolve(b.key);
+  assert.equal(resolved.id, a.id);
+  assert.equal(resolved.key, a.key);
+  // Asking for a (canonical) returns a as-is
+  assert.equal(vocabulary.resolve(a.key).id, a.id);
+  // Unknown key returns null
+  assert.equal(vocabulary.resolve('does-not-exist'), null);
+});
+
+test('observations under an alias surface through canonical query', () => {
+  const { vocabulary } = require('../lib');
+  const ctx = { sessionId: 'smoke-test-session', intent: 'alias query test' };
+  const canon = vocabulary.register({ type: 'concept', label: 'Canonical X' }, ctx);
+  const alias = vocabulary.register({ type: 'concept', label: 'Alias X' }, ctx);
+  // Write one obs under each, BEFORE merging
+  nodes.create({ uid: 'alias-q:1', type: 'event', name: 'obs A', concept_key: canon.key }, ctx);
+  nodes.create({ uid: 'alias-q:2', type: 'event', name: 'obs B', concept_key: alias.key }, ctx);
+  // Now merge alias → canonical
+  vocabulary.merge(canon.key, alias.key, ctx);
+  // Both observations should now point to canon (merge re-points concept_id)
+  const after_b = nodes.getByUid('alias-q:2');
+  assert.equal(after_b.concept_id, canon.id);
+});
+
+test('vocab.split detaches a node into a fresh concept', () => {
+  const { vocabulary } = require('../lib');
+  const ctx = { sessionId: 'smoke-test-session', intent: 'split test' };
+  const c = vocabulary.register({ type: 'concept', label: 'Compound concept' }, ctx);
+  const n1 = nodes.create({ uid: 'split:1', type: 'event', name: 'should stay', concept_key: c.key }, ctx);
+  const n2 = nodes.create({ uid: 'split:2', type: 'event', name: 'should split off', concept_key: c.key }, ctx);
+  assert.equal(n1.concept_id, c.id);
+  assert.equal(n2.concept_id, c.id);
+  // Split n2 into its own concept
+  const r = vocabulary.split('split:2', { newLabel: 'Split out', ...ctx });
+  const after_n1 = nodes.getByUid('split:1');
+  const after_n2 = nodes.getByUid('split:2');
+  assert.equal(after_n1.concept_id, c.id, 'n1 unaffected');
+  assert.notEqual(after_n2.concept_id, c.id, 'n2 has a new concept');
+  // The new concept exists
+  const newC = vocabulary.getByKey(r.new_concept);
+  assert.equal(newC.label, 'Split out');
+  assert.equal(newC.id, after_n2.concept_id);
 });
 
 test('parent_session_id is persisted when supplied', () => {

@@ -86,7 +86,38 @@ app.get('/api/health', (req, res) => {
 // Nodes
 // ============================================================
 app.get('/api/nodes', (req, res) => {
-  const { type, asset, status, limit, offset, sort, order } = req.query;
+  const { type, asset, status, limit, offset, sort, order, concept_key } = req.query;
+  // If a concept_key filter is given, follow merged_into_id to canonical so
+  // observations written under aliases still show up under their canonical concept.
+  if (concept_key) {
+    const canonical = vocabulary.resolve(concept_key);
+    if (!canonical) return res.json({ total: 0, count: 0, offset: 0, limit: limit ? Number(limit) : 50, items: [] });
+    const D = db.open();
+    // Match canonical + any merged-into descendants (one level — same chain we walked).
+    const where = ['(n.concept_id = @cid OR n.concept_id IN (SELECT id FROM vocabulary WHERE merged_into_id = @cid))'];
+    const params = { cid: canonical.id, limit: limit ? Number(limit) : 50, offset: offset ? Number(offset) : 0 };
+    if (type)   { where.push('n.type = @type');     params.type = type; }
+    if (asset)  { where.push('n.asset = @asset');   params.asset = asset; }
+    if (status) { where.push('n.status = @status'); params.status = status; }
+    const sortColumn = ['id', 'type', 'name', 'asset', 'status', 'created_at', 'updated_at', 'valid_from', 'valid_to', 'eta_date']
+      .includes(sort) ? sort : 'updated_at';
+    const sortOrder = String(order).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const total = D.prepare(`SELECT COUNT(*) AS n FROM nodes n WHERE ${where.join(' AND ')}`).get(params).n;
+    const items = D.prepare(`
+      SELECT n.* FROM nodes n
+      WHERE ${where.join(' AND ')}
+      ORDER BY n.${sortColumn} ${sortOrder}, n.id ${sortOrder}
+      LIMIT @limit OFFSET @offset
+    `).all(params).map(r => ({
+      ...r,
+      props: r.props_json ? JSON.parse(r.props_json) : {},
+    }));
+    return res.json({
+      total, count: items.length, offset: params.offset, limit: params.limit,
+      filter: { concept_key: canonical.key, requested_concept_key: concept_key, redirected: canonical.key !== concept_key },
+      items,
+    });
+  }
   const rows = nodes.list({
     type, asset, status, sort, order,
     limit: limit ? Number(limit) : 50,
@@ -105,7 +136,18 @@ app.post('/api/nodes', (req, res) => {
   try {
     const body = req.body || {};
     const created = nodes.create(body, { ...req.audit, reason: body.reason });
-    res.status(201).json(created);
+    // Attach the non-enumerable vocab hints to the response so callers can
+    // see what got auto-created and what similar canonicals exist.
+    const payload = { ...created };
+    if (created.vocab) {
+      if (created.vocab.auto_created && created.vocab.auto_created.length) {
+        payload.auto_created_vocabulary = created.vocab.auto_created;
+      }
+      if (created.vocab.similar_canonical && created.vocab.similar_canonical.length) {
+        payload.similar_canonical = created.vocab.similar_canonical;
+      }
+    }
+    res.status(201).json(payload);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -287,15 +329,33 @@ app.get('/api/vocabulary/related', (req, res) => {
 });
 
 app.get('/api/vocabulary/:key', (req, res) => {
-  const v = vocabulary.getByKey(req.params.key);
-  if (!v) return res.status(404).json({ error: 'not found' });
+  const requested = vocabulary.getByKey(req.params.key);
+  if (!requested) return res.status(404).json({ error: 'not found' });
+  // Follow merged_into_id chain. If the user asked for an alias / merged
+  // entry, return canonical with redirect markers so the caller can see
+  // both names (original + canonical) and decide what to display.
+  const canonical = vocabulary.resolve(requested.id);
+  const v = canonical || requested;
   const D = db.open();
-  const observations = D.prepare(
-    `SELECT id, uid, type, name, status, asset, valid_from, valid_to
-     FROM nodes WHERE concept_id = ? ORDER BY valid_from DESC LIMIT 100`
-  ).all(v.id);
+  // Observations under canonical AND under any rows that merged into it (so
+  // historical writes attributed to the alias still surface here).
+  const observations = D.prepare(`
+    SELECT n.id, n.uid, n.type, n.name, n.status, n.asset, n.valid_from, n.valid_to, v2.key AS via_concept_key
+    FROM nodes n
+    JOIN vocabulary v2 ON v2.id = n.concept_id
+    WHERE n.concept_id = ?
+       OR n.concept_id IN (SELECT id FROM vocabulary WHERE merged_into_id = ?)
+    ORDER BY n.valid_from DESC LIMIT 100
+  `).all(v.id, v.id);
   const childRows = vocabulary.children(v.key);
-  res.json({ vocabulary: v, observations, children: childRows });
+  res.json({
+    vocabulary: v,
+    requested_key: requested.key,
+    canonical_key: v.key,
+    redirected: requested.key !== v.key,
+    observations,
+    children: childRows,
+  });
 });
 
 app.post('/api/vocabulary', (req, res) => {
@@ -393,6 +453,18 @@ app.post('/api/organizer/recategorize', (req, res) => {
     const { key, parent, reason } = req.body || {};
     if (!key) return res.status(400).json({ error: 'key required' });
     res.json(vocabulary.recategorize(key, parent || null, { ...req.audit, reason }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/organizer/split', (req, res) => {
+  try {
+    const { node_uid, new_label, new_key, reason } = req.body || {};
+    if (!node_uid) return res.status(400).json({ error: 'node_uid required' });
+    res.json(vocabulary.split(node_uid, {
+      ...req.audit, newLabel: new_label, newKey: new_key, reason,
+    }));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

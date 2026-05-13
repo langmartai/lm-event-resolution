@@ -464,6 +464,20 @@ vocab.command('alias <key> <alias>')
     console.log(JSON.stringify(vocabulary.addAlias(key, alias, audit), null, 2));
   });
 
+vocab.command('split <node_uid>')
+  .description('Detach one observation from its current concept into a fresh concept (recovery from a wrong align/merge)')
+  .option('--label <text>', 'label for the new concept (defaults to the node\'s name)')
+  .option('--key <key>', 'explicit key for the new concept (auto-derived otherwise)')
+  .option('--reason <text>')
+  .action(function (uid, opts) {
+    const audit = resolveAuditContext(this);
+    const r = vocabulary.split(uid, {
+      newLabel: opts.label, newKey: opts.key,
+      ...audit, reason: opts.reason,
+    });
+    console.log(JSON.stringify(r, null, 2));
+  });
+
 vocab.command('mark-reviewed <key>')
   .description('Mark an auto_registered entry as reviewed (removes it from the organizer queue)')
   .option('--reason <text>')
@@ -514,6 +528,20 @@ organize.command('review')
     const audit = resolveAuditContext(this);
     await runOrganizeAgent({
       runbook: 'organize',
+      audit, lmAssist: opts.lmAssist,
+      params: { type: opts.type },
+    });
+  });
+
+organize.command('align')
+  .description('Background vocab alignment — agent prefers alias-link over merge. Use on permissive-mode buildup.')
+  .option('--type <t>', 'concept | category', 'concept')
+  .option('--lm-assist <url>', '', 'http://localhost:3100')
+  .option('--reason <text>')
+  .action(async function (opts) {
+    const audit = resolveAuditContext(this);
+    await runOrganizeAgent({
+      runbook: 'align',
       audit, lmAssist: opts.lmAssist,
       params: { type: opts.type },
     });
